@@ -1,29 +1,36 @@
 # Core Web Framework
-flask==3.0.0
-flask-cors==4.0.0
-werkzeug==3.0.1
+flask==3.0.3
+flask-cors==5.0.0
+werkzeug==3.0.6
 
 # Deep Learning & Face Recognition
-deepface==0.0.79
-tensorflow==2.15.0
-tf-keras==2.15.0
+deepface==0.0.93
+tensorflow==2.17.1
+tf-keras==2.17.0
 
 # Configuration Management
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic==2.10.3
+pydantic-settings==2.6.1
 python-dotenv==1.0.1
 
-# Image Processing
-Pillow==10.1.0
-opencv-python==4.8.1.78
+# Image Processing (optimized)
+Pillow==11.0.0
+opencv-python-headless==4.10.0.84  # Headless for better performance
 
-# Data & ML
-numpy==1.24.3
-pandas==2.1.4
+# Data & ML (optimized)
+numpy==1.26.4  # Optimized for modern CPUs
+pandas==2.2.3
+scipy==1.14.1  # For optimized vector operations
+
+# Performance & Caching
+faiss-cpu==1.9.0.post1  # Fast similarity search for embeddings
 
 # Cloud Storage
-supabase==2.0.3
+supabase==2.10.0
 
 # Testing
-pytest==7.4.3
-pytest-cov==4.1.0
+pytest==8.3.4
+pytest-cov==6.0.0
+
+# Production Server
+gunicorn==23.0.0  # Production WSGI server

@@ -14,7 +14,24 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from config import settings, setup_logging
-from services import ImageProcessor, EmbeddingCache, FaceRecognitionService, SupabaseService
+from services import SupabaseService
+
+# Import optimized or standard services based on configuration
+if settings.USE_OPTIMIZED_PROCESSOR:
+    from services.image_processor_optimized import OptimizedImageProcessor as ImageProcessor
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Using OptimizedImageProcessor")
+else:
+    from services import ImageProcessor
+
+if settings.USE_OPTIMIZED_CACHE:
+    from services.embedding_cache_optimized import OptimizedEmbeddingCache as EmbeddingCache
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Using OptimizedEmbeddingCache with FAISS")
+else:
+    from services import EmbeddingCache
+
+from services import FaceRecognitionService
 from models.schemas import (
     RegisterCamperResponse,
     CheckAttendanceResponse,
@@ -367,21 +384,14 @@ def recognize_faces(activity_schedule_id: int):
             return jsonify({
                 "success": False,
                 "message": "No photo file provided",
-                "activity_schedule_id": activity_schedule_id,
-                "recognized_campers": [],
-                "total_faces_detected": 0,
-                "matched_faces": 0
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0,
+                "matchedFaces": 0
             }), 400
         
-        # Get optional parameters
-        confidence_threshold = request.form.get('confidence_threshold')
-        if confidence_threshold:
-            try:
-                confidence_threshold = float(confidence_threshold)
-            except:
-                confidence_threshold = settings.CONFIDENCE_THRESHOLD
-        else:
-            confidence_threshold = settings.CONFIDENCE_THRESHOLD
+        # Note: Confidence threshold is read from .env (single source of truth)
+        # No longer accepts confidence_threshold parameter in request
         
         # Validate file
         file = request.files['photo']
@@ -390,10 +400,10 @@ def recognize_faces(activity_schedule_id: int):
             return jsonify({
                 "success": False,
                 "message": error_msg,
-                "activity_schedule_id": activity_schedule_id,
-                "recognized_campers": [],
-                "total_faces_detected": 0,
-                "matched_faces": 0
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0,
+                "matchedFaces": 0
             }), 400
         
         # Save uploaded file
@@ -402,10 +412,10 @@ def recognize_faces(activity_schedule_id: int):
             return jsonify({
                 "success": False,
                 "message": error,
-                "activity_schedule_id": activity_schedule_id,
-                "recognized_campers": [],
-                "total_faces_detected": 0,
-                "matched_faces": 0
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0,
+                "matchedFaces": 0
             }), 400
         
         # Generate session ID
@@ -425,21 +435,32 @@ def recognize_faces(activity_schedule_id: int):
             return jsonify({
                 "success": False,
                 "message": result.get('error', 'Recognition failed'),
-                "activity_schedule_id": activity_schedule_id,
-                "recognized_campers": [],
-                "total_faces_detected": 0,
-                "matched_faces": 0
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0,
+                "matchedFaces": 0
             }), 500
         
         # Format response
         recognized_campers = []
         for camper in result.get('recognized_campers', []):
+            # Extract camper ID from filename: avatar_16_xxx.jpg -> 16
+            camper_id_str = camper['camper_id']
+            camper_id = 0
+            
+            if camper_id_str.startswith('avatar_'):
+                parts = camper_id_str.split('_')
+                if len(parts) >= 2 and parts[1].isdigit():
+                    camper_id = int(parts[1])
+            elif camper_id_str.isdigit():
+                camper_id = int(camper_id_str)
+            
             recognized_campers.append({
-                "camper_id": int(camper['camper_id']) if camper['camper_id'].isdigit() else 0,
-                "camper_name": "",  # Will be filled by .NET service
+                "camperId": camper_id,
+                "camperName": "",  # Will be filled by .NET service
                 "confidence": 1.0 - camper['distance'],  # Convert distance to confidence
-                "camper_group_id": 0,  # Will be filled by .NET service
-                "bounding_box": [
+                "camperGroupId": 0,  # Will be filled by .NET service
+                "boundingBox": [
                     camper['face_region']['x'],
                     camper['face_region']['y'],
                     camper['face_region']['width'],
@@ -450,12 +471,12 @@ def recognize_faces(activity_schedule_id: int):
         return jsonify({
             "success": True,
             "message": f"Recognized {len(recognized_campers)} camper(s)",
-            "activity_schedule_id": activity_schedule_id,
-            "session_id": session_id,
-            "recognized_campers": recognized_campers,
-            "total_faces_detected": result['total_faces_detected'],
-            "matched_faces": len(recognized_campers),
-            "processing_time_ms": int(processing_time),
+            "activityScheduleId": activity_schedule_id,  # PascalCase for .NET compatibility
+            "sessionId": session_id,
+            "recognizedCampers": recognized_campers,
+            "totalFacesDetected": result['total_faces_detected'],
+            "matchedFaces": len(recognized_campers),
+            "processingTimeMs": int(processing_time),
             "timestamp": get_now().isoformat()
         }), 200
     
@@ -464,10 +485,10 @@ def recognize_faces(activity_schedule_id: int):
         return jsonify({
             "success": False,
             "message": str(e),
-            "activity_schedule_id": activity_schedule_id,
-            "recognized_campers": [],
-            "total_faces_detected": 0,
-            "matched_faces": 0
+            "activityScheduleId": activity_schedule_id,
+            "recognizedCampers": [],
+            "totalFacesDetected": 0,
+            "matchedFaces": 0
         }), 500
     
     finally:

@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = Field(default=10, description="Batch size for bulk operations")
     CACHE_PRELOAD: bool = Field(default=True, description="Preload embeddings on startup")
     
+    # Optimization flags
+    USE_OPTIMIZED_CACHE: bool = Field(default=True, description="Use FAISS-accelerated embedding cache")
+    USE_OPTIMIZED_PROCESSOR: bool = Field(default=True, description="Use optimized image processor")
+    
     # ==================== Directory Paths ====================
     BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent)
     UPLOAD_FOLDER: Optional[Path] = Field(default=None)
