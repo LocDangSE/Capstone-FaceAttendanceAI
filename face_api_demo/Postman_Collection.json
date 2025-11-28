@@ -1,0 +1,262 @@
+{
+    "info": {
+        "name": "Face Recognition API - Attendance System",
+        "description": "Complete Postman collection for testing Face Recognition API",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "1. Health Check",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "http://localhost:5000/health",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "health"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "2. Detect Faces",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "image",
+                            "type": "file",
+                            "src": [],
+                            "description": "Upload image file with face(s)"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:5000/api/face/detect",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "detect"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "3. Register Student Face",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "image",
+                            "type": "file",
+                            "src": [],
+                            "description": "Student photo with clear face"
+                        },
+                        {
+                            "key": "studentId",
+                            "value": "S2024001",
+                            "type": "text",
+                            "description": "Student ID"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:5000/api/face/register",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "register"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "4. Setup Class Database",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "classId",
+                            "value": "class-guid-123",
+                            "type": "text"
+                        },
+                        {
+                            "key": "student_S2024001",
+                            "type": "file",
+                            "src": [],
+                            "description": "Photo for student 1"
+                        },
+                        {
+                            "key": "student_S2024002",
+                            "type": "file",
+                            "src": [],
+                            "description": "Photo for student 2"
+                        },
+                        {
+                            "key": "student_S2024003",
+                            "type": "file",
+                            "src": [],
+                            "description": "Photo for student 3"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:5000/api/face/class/setup",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "class",
+                        "setup"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "5. Recognize Face (MAIN)",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "image",
+                            "type": "file",
+                            "src": [],
+                            "description": "Webcam photo to recognize"
+                        },
+                        {
+                            "key": "classId",
+                            "value": "class-guid-123",
+                            "type": "text"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:5000/api/face/recognize",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "recognize"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "6. Get Class Info",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "http://localhost:5000/api/face/class/class-guid-123/info",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "class",
+                        "class-guid-123",
+                        "info"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "7. Delete Student from Class",
+            "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                    "raw": "http://localhost:5000/api/face/class/class-guid-123/student/S2024001",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "class",
+                        "class-guid-123",
+                        "student",
+                        "S2024001"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "8. Verify Face Match",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "image1",
+                            "type": "file",
+                            "src": [],
+                            "description": "First photo"
+                        },
+                        {
+                            "key": "image2",
+                            "type": "file",
+                            "src": [],
+                            "description": "Second photo"
+                        }
+                    ]
+                },
+                "url": {
+                    "raw": "http://localhost:5000/api/face/verify",
+                    "protocol": "http",
+                    "host": [
+                        "localhost"
+                    ],
+                    "port": "5000",
+                    "path": [
+                        "api",
+                        "face",
+                        "verify"
+                    ]
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+*.pyo
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# Environment Variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Temporary Files
+temp/
+*.tmp
+
+# Uploaded Files
+uploads/
+sessions/
+
+# Face Database (local development)
+face_database/
+
+# Embeddings Cache
+embeddings/*.npy
+embeddings/*.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep folder structure
+!uploads/.gitkeep
+!temp/.gitkeep
+!logs/.gitkeep
+!sessions/.gitkeep
+!embeddings/.gitkeep
+!face_database/.gitkeep

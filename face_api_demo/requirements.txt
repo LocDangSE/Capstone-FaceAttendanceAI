@@ -1,0 +1,29 @@
+# Core Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+werkzeug==3.0.1
+
+# Deep Learning & Face Recognition
+deepface==0.0.79
+tensorflow==2.15.0
+tf-keras==2.15.0
+
+# Configuration Management
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+
+# Image Processing
+Pillow==10.1.0
+opencv-python==4.8.1.78
+
+# Data & ML
+numpy==1.24.3
+pandas==2.1.4
+
+# Cloud Storage
+supabase==2.0.3
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
