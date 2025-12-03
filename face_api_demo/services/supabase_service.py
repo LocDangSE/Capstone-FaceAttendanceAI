@@ -432,16 +432,17 @@ class SupabaseService:
     ) -> Tuple[int, str]:
         """
         Download core CamperGroup faces (used for all core activities in the camp)
+        New structure: camp_id/camper_group_*/avatar_camperid_*.jpg
         
         Args:
             camp_id: Camp identifier
-            camper_ids: List of all camper IDs in the camp's core group
+            camper_ids: List of all camper IDs in the camp's core group (not used in new structure)
             local_folder: Local folder to save images (e.g., face_database/{camp_id}/camper_groups)
             
         Returns:
             Tuple of (downloaded_count, message)
         """
-        logger.info(f"📥 Downloading core group for Camp {camp_id} ({len(camper_ids)} campers)")
+        logger.info(f"📥 Downloading core group for Camp {camp_id} from cloud structure: camp_{camp_id}/camper_group_*/avatar_*")
         
         # Create folder
         local_folder.mkdir(parents=True, exist_ok=True)
@@ -449,29 +450,81 @@ class SupabaseService:
         success_count = 0
         failed = []
         
-        for camper_id in camper_ids:
-            try:
-                # Download from: {camp_id}/camper_groups/{camper_id}.jpg
-                remote_path = f"{camp_id}/camper_groups/{camper_id}.jpg"
-                local_path = str(local_folder / f"{camper_id}.jpg")
-                
-                success, error = self.download_file(remote_path, local_path)
-                if success:
-                    success_count += 1
-                else:
-                    failed.append(camper_id)
-                    logger.warning(f"  ⚠️ Failed: {camper_id}")
+        try:
+            # List folders under camp_id (e.g., camp_17/)
+            camp_folder_items = self.list_files(f"camp_{camp_id}/")
             
-            except Exception as e:
-                failed.append(camper_id)
-                logger.error(f"  ❌ Error: {camper_id} - {e}")
+            # Find all camper_group folders (e.g., camper_group_14, camper_group_15)
+            camper_group_folders = [
+                item.get('name', '') for item in camp_folder_items
+                if item.get('name', '').startswith('camper_group_')
+            ]
+            
+            if not camper_group_folders:
+                logger.warning(f"  ⚠️ No camper_group folders found under camp_{camp_id}/")
+                return 0, "No camper_group folders found in cloud"
+            
+            logger.info(f"  Found {len(camper_group_folders)} camper_group folders")
+            
+            # Download from each camper_group folder
+            for group_folder in camper_group_folders:
+                try:
+                    # List files in camper_group folder
+                    group_path = f"camp_{camp_id}/{group_folder}/"
+                    group_files = self.list_files(group_path)
+                    
+                    # Filter for avatar images (avatar_21_*.jpg)
+                    avatar_files = [
+                        f for f in group_files
+                        if f.get('name', '').startswith('avatar_') and 
+                           f.get('name', '').lower().endswith(('.jpg', '.jpeg', '.png'))
+                    ]
+                    
+                    logger.info(f"  Processing {group_folder}: {len(avatar_files)} avatars")
+                    
+                    for avatar_file in avatar_files:
+                        try:
+                            filename = avatar_file.get('name', '')
+                            # Extract camper ID from avatar_21_xxx.jpg format
+                            import re
+                            match = re.match(r'avatar_(\d+)_.*\.(jpg|jpeg|png)$', filename, re.IGNORECASE)
+                            
+                            if not match:
+                                logger.warning(f"    ⚠️ Skipping invalid filename format: {filename}")
+                                continue
+                            
+                            camper_id = match.group(1)
+                            
+                            # Download from cloud
+                            remote_path = f"{group_path}{filename}"
+                            local_path = str(local_folder / f"{camper_id}.jpg")
+                            
+                            success, error = self.download_file(remote_path, local_path)
+                            if success:
+                                success_count += 1
+                                logger.info(f"    ✅ Downloaded camper {camper_id}")
+                            else:
+                                failed.append(f"{camper_id} ({filename})")
+                                logger.warning(f"    ⚠️ Failed: {camper_id} - {error}")
+                        
+                        except Exception as e:
+                            logger.error(f"    ❌ Error processing {avatar_file.get('name', '')}: {e}")
+                            failed.append(str(avatar_file.get('name', '')))
+                
+                except Exception as e:
+                    logger.error(f"  ❌ Error processing group folder {group_folder}: {e}")
+            
+            message = f"Core group: {success_count} campers downloaded"
+            if failed:
+                message += f" ({len(failed)} failed)"
+            
+            logger.info(f"  ✅ {message}")
+            return success_count, message
         
-        message = f"Core group: {success_count}/{len(camper_ids)} campers"
-        if failed:
-            message += f" ({len(failed)} failed)"
-        
-        logger.info(f"  ✅ {message}")
-        return success_count, message
+        except Exception as e:
+            error_msg = f"Error syncing core group: {str(e)}"
+            logger.error(f"  ❌ {error_msg}")
+            return 0, error_msg
     
     def sync_optional_activity(
         self,
@@ -482,17 +535,18 @@ class SupabaseService:
     ) -> Tuple[int, str]:
         """
         Download faces for an optional activity (CamperActivity)
+        New structure: camp_{campId}/camperactivity_{activityScheduleId}/avatar_{camperId}_{guid}.jpg
         
         Args:
             camp_id: Camp identifier
-            activity_id: Activity identifier
-            camper_ids: List of camper IDs enrolled in this optional activity
-            local_folder: Local folder to save images
+            activity_id: Activity schedule identifier (activityScheduleId)
+            camper_ids: List of camper IDs enrolled in this optional activity (not used - downloads all from folder)
+            local_folder: Local folder to save images (e.g., face_database/camp_{campId}/camper_activities/{activityId})
             
         Returns:
             Tuple of (downloaded_count, message)
         """
-        logger.info(f"📥 Optional activity {activity_id} ({len(camper_ids)} campers)")
+        logger.info(f"📥 Downloading optional activity {activity_id} for Camp {camp_id} from cloud structure: camp_{camp_id}/camperactivity_{activity_id}/avatar_*")
         
         # Create folder
         local_folder.mkdir(parents=True, exist_ok=True)
@@ -500,25 +554,64 @@ class SupabaseService:
         success_count = 0
         failed = []
         
-        for camper_id in camper_ids:
-            try:
-                # Download from: {camp_id}/camper_activities/{activity_id}/{camper_id}.jpg
-                remote_path = f"{camp_id}/camper_activities/{activity_id}/{camper_id}.jpg"
-                local_path = str(local_folder / f"{camper_id}.jpg")
-                
-                success, error = self.download_file(remote_path, local_path)
-                if success:
-                    success_count += 1
-                else:
-                    failed.append(camper_id)
+        try:
+            # Download from camperactivity folder
+            # Structure: camp_{camp_id}/camperactivity_{activity_id}/avatar_{camper_id}_{guid}.jpg
+            activity_folder_path = f"camp_{camp_id}/camperactivity_{activity_id}/"
             
-            except Exception as e:
-                failed.append(camper_id)
-                logger.error(f"  ❌ Error: {camper_id} - {e}")
+            # List files in camperactivity folder
+            activity_files = self.list_files(activity_folder_path)
+            
+            if not activity_files:
+                logger.warning(f"  ⚠️ No files found in {activity_folder_path}")
+                return 0, f"No files found in camperactivity_{activity_id}"
+            
+            # Filter for avatar images (avatar_21_*.jpg)
+            avatar_files = [
+                f for f in activity_files
+                if f.get('name', '').startswith('avatar_') and 
+                   f.get('name', '').lower().endswith(('.jpg', '.jpeg', '.png'))
+            ]
+            
+            logger.info(f"  Found {len(avatar_files)} avatars in camperactivity_{activity_id}")
+            
+            for avatar_file in avatar_files:
+                try:
+                    filename = avatar_file.get('name', '')
+                    # Extract camper ID from avatar_21_xxx.jpg format
+                    import re
+                    match = re.match(r'avatar_(\d+)_.*\.(jpg|jpeg|png)$', filename, re.IGNORECASE)
+                    
+                    if not match:
+                        logger.warning(f"    ⚠️ Skipping invalid filename format: {filename}")
+                        continue
+                    
+                    camper_id = match.group(1)
+                    
+                    # Download from cloud
+                    remote_path = f"{activity_folder_path}{filename}"
+                    local_path = str(local_folder / f"{camper_id}.jpg")
+                    
+                    success, error = self.download_file(remote_path, local_path)
+                    if success:
+                        success_count += 1
+                        logger.info(f"    ✅ Downloaded camper {camper_id}")
+                    else:
+                        failed.append(f"{camper_id} ({filename})")
+                        logger.warning(f"    ⚠️ Failed: {camper_id} - {error}")
+                
+                except Exception as e:
+                    logger.error(f"    ❌ Error processing {avatar_file.get('name', '')}: {e}")
+                    failed.append(str(avatar_file.get('name', '')))
+            
+            message = f"Optional activity {activity_id}: {success_count} campers downloaded"
+            if failed:
+                message += f" ({len(failed)} failed)"
+            
+            logger.info(f"  ✅ {message}")
+            return success_count, message
         
-        message = f"Activity {activity_id}: {success_count}/{len(camper_ids)}"
-        if failed:
-            message += f" ({len(failed)} failed)"
-        
-        logger.info(f"  ✅ {message}")
-        return success_count, message
+        except Exception as e:
+            error_msg = f"Sync error for activity {activity_id}: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            return 0, error_msg

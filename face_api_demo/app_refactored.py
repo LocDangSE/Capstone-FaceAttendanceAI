@@ -1,7 +1,7 @@
 """
 Face Recognition API Service - Production Ready
 Integrated with ASP.NET Camp Management System
-Folder structure: attendance-sessions/camp_{campId}/camper_group_{groupId}/{camperId}/photo.jpg
+Folder structure: attendance-sessions/camp_{campId}/camper_group_{groupId}/avatar_{camperId}_xxx.jpg
 """
 
 from flask import Flask, request, jsonify
@@ -113,12 +113,12 @@ def health_check():
 def load_camp_face_db(camp_id: int):
     """
     Load face database for a specific camp from Supabase attendance-sessions bucket
-    Downloads faces from: attendance-sessions/camp_{campId}/camper_group_{groupId}/{camperId}/
+    Downloads faces from: attendance-sessions/camp_{campId}/camper_group_{groupId}/avatar_{camperId}_xxx.jpg
     Loads embeddings into memory for fast recognition
     
     Expected Supabase structure:
-    - attendance-sessions/camp_{campId}/camper_group_{groupId}/{camperId}/photo.jpg
-    - attendance-sessions/camp_{campId}/camperactivity_{activityId}/{camperId}/photo.jpg
+    - attendance-sessions/camp_{campId}/camper_group_{groupId}/avatar_{camperId}_xxx.jpg
+    - attendance-sessions/camp_{campId}/camperactivity_{activityId}/avatar_{camperId}_xxx.jpg
     """
     try:
         request_data = request.json if request.json else {}
@@ -149,7 +149,7 @@ def load_camp_face_db(camp_id: int):
         local_camp_path.mkdir(parents=True, exist_ok=True)
         
         # Download all faces from Supabase attendance-sessions bucket
-        # Path pattern: attendance-sessions/camp_{campId}/camper_group_{groupId}/{camperId}/
+        # Path pattern: attendance-sessions/camp_{campId}/camper_group_{groupId}/avatar_{camperId}_xxx.jpg
         supabase_camp_prefix = f"camp_{camp_id}"
         
         total_downloaded = 0
@@ -188,57 +188,70 @@ def load_camp_face_db(camp_id: int):
                             # Check if it's an image file (not a folder marker)
                             if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                                 # Extract camper_id from filename: avatar_16_xxx.jpg -> 16
-                                if filename.startswith('avatar_'):
-                                    parts = filename.split('_')
-                                    if len(parts) >= 2:
-                                        camper_id = parts[1]
-                                    else:
-                                        logger.warning(f"Unexpected filename format: {filename}")
-                                        continue
-                                else:
-                                    logger.warning(f"Filename doesn't start with 'avatar_': {filename}")
+                                import re
+                                match = re.match(r'avatar_(\d+)_.*\.(jpg|jpeg|png)$', filename, re.IGNORECASE)
+                                
+                                if not match:
+                                    logger.warning(f"Unexpected filename format: {filename}")
                                     continue
                                 
-                                # Download the photo (flat structure in camp folder)
+                                camper_id = match.group(1)
+                                
+                                # Download the photo and save in separate group folder
                                 remote_path = f"{group_prefix}/{filename}"
-                                local_file = local_camp_path / filename
+                                local_file = local_camp_path / item['name'] / f"{camper_id}.jpg"
                                 local_file.parent.mkdir(parents=True, exist_ok=True)
+                                groups_loaded.append(item['name'])
                                 
                                 logger.debug(f"Downloading: {remote_path} -> {local_file}")
                                 success, error = supabase_service.download_file(remote_path, str(local_file))
                                 if success:
                                     total_downloaded += 1
-                                    logger.debug(f"✅ Downloaded camper {camper_id} photo")
+                                    logger.debug(f"✅ Downloaded camper {camper_id} photo (from {filename})")
                                 else:
                                     logger.error(f"❌ Failed to download {remote_path}: {error}")
                                         
                     except Exception as e:
                         logger.warning(f"Error processing group {group_id}: {e}")
                 
-                # Process camperactivity folders
+                # Process camperactivity folders (optional activities)
                 elif item['name'].startswith('camperactivity_'):
                     activity_id = item['name'].replace('camperactivity_', '')
-                    activity_prefix = f"{supabase_camp_prefix}{item['name']}/"
+                    activity_prefix = f"{supabase_camp_prefix}/{item['name']}"
+                    logger.info(f"Processing optional activity: {item['name']} (prefix: {activity_prefix})")
                     
                     try:
-                        campers = supabase_service.client.storage.from_(settings.SUPABASE_BUCKET).list(activity_prefix)
+                        # List files directly in the activity folder (same structure as camper_group)
+                        activity_items = supabase_service.client.storage.from_(settings.SUPABASE_BUCKET).list(activity_prefix)
+                        logger.debug(f"Found {len(activity_items)} items in {activity_prefix}")
                         
-                        for camper_folder in campers:
-                            if camper_folder['id']:
-                                camper_id = camper_folder['name']
-                                camper_prefix = f"{activity_prefix}{camper_id}/"
+                        for activity_item in activity_items:
+                            filename = activity_item['name']
+                            
+                            # Check if it's an image file
+                            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                                # Extract camper_id from filename: avatar_16_xxx.jpg -> 16
+                                import re
+                                match = re.match(r'avatar_(\d+)_.*\.(jpg|jpeg|png)$', filename, re.IGNORECASE)
                                 
-                                photos = supabase_service.client.storage.from_(settings.SUPABASE_BUCKET).list(camper_prefix)
+                                if not match:
+                                    logger.warning(f"Unexpected filename format in activity: {filename}")
+                                    continue
                                 
-                                for photo in photos:
-                                    if photo['name'].lower().endswith(('.jpg', '.jpeg', '.png')):
-                                        remote_path = f"{camper_prefix}{photo['name']}"
-                                        local_file = local_camp_path / f"activity_{activity_id}" / camper_id / photo['name']
-                                        local_file.parent.mkdir(parents=True, exist_ok=True)
-                                        
-                                        success, error = supabase_service.download_file(remote_path, str(local_file))
-                                        if success:
-                                            total_downloaded += 1
+                                camper_id = match.group(1)
+                                
+                                # Download and save as {camperId}.jpg in activity folder
+                                remote_path = f"{activity_prefix}/{filename}"
+                                local_file = local_camp_path / item['name'] / f"{camper_id}.jpg"
+                                local_file.parent.mkdir(parents=True, exist_ok=True)
+                                
+                                logger.debug(f"Downloading activity photo: {remote_path} -> {local_file}")
+                                success, error = supabase_service.download_file(remote_path, str(local_file))
+                                if success:
+                                    total_downloaded += 1
+                                    logger.debug(f"✅ Downloaded camper {camper_id} for activity {activity_id}")
+                                else:
+                                    logger.error(f"❌ Failed to download {remote_path}: {error}")
                     
                     except Exception as e:
                         logger.warning(f"Error processing activity {activity_id}: {e}")
@@ -252,8 +265,11 @@ def load_camp_face_db(camp_id: int):
                 "face_count": 0
             }), 500
         
-        # Load embeddings into cache
-        face_service.embedding_cache._load_embeddings_from_folder(local_camp_path)
+        # Load embeddings from all group folders
+        for group_folder in groups_loaded:
+            group_path = local_camp_path / group_folder
+            if group_path.exists():
+                face_service.embedding_cache._load_embeddings_from_folder(group_path)
         
         # Update loaded camps registry
         loaded_camps[camp_id] = {
@@ -368,13 +384,316 @@ def get_face_db_stats():
 
 
 # ============================================================================
-# ENDPOINT 5: Recognize Faces for Activity Schedule
+# ENDPOINT 5: Recognize Faces for Specific Group
+# ============================================================================
+
+@app.route('/api/recognition/recognize-group/<int:camp_id>/<int:group_id>', methods=['POST'])
+def recognize_faces_for_group(camp_id: int, group_id: int):
+    """
+    Recognize faces for a specific camper group
+    Loads only faces from that group's folder for accurate matching
+    """
+    temp_file = None
+    try:
+        # Validate image
+        if 'photo' not in request.files:
+            return jsonify({
+                "success": False,
+                "message": "No photo file provided",
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Validate file
+        file = request.files['photo']
+        is_valid, error_msg = validate_image_file(file)
+        if not is_valid:
+            return jsonify({
+                "success": False,
+                "message": error_msg,
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Save uploaded file
+        temp_file, error = file_handler.save_uploaded_file(file)
+        if error:
+            return jsonify({
+                "success": False,
+                "message": error,
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Load faces for this specific group
+        group_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}" / f"camper_group_{group_id}"
+        
+        # Check if group folder exists and has images
+        if not group_folder.exists():
+            logger.error(f"Group folder not found: {group_folder}")
+            return jsonify({
+                "success": False,
+                "message": f"Group folder not found. Please preload camp {camp_id} first.",
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Check if folder has any images
+        image_files = list(group_folder.glob("*.jpg"))
+        if not image_files:
+            logger.error(f"Group folder is empty: {group_folder}")
+            return jsonify({
+                "success": False,
+                "message": f"Group {group_id} has no face data. Please preload camp {camp_id} first.",
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        logger.info(f"📂 Loading {len(image_files)} faces from group {group_id}")
+        
+        # Clear cache and load only this group's faces
+        face_service.embedding_cache.clear_cache()
+        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+        
+        # Generate session ID
+        session_id = str(uuid.uuid4())
+        
+        # Perform recognition
+        start_time = datetime.now()
+        result = face_service.check_attendance(
+            image_path=temp_file,
+            session_id=session_id,
+            preprocess=True,
+            save_results=True
+        )
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        
+        if not result['success']:
+            return jsonify({
+                "success": False,
+                "message": result.get('error', 'Recognition failed'),
+                "campId": camp_id,
+                "groupId": group_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 500
+        
+        # Format response
+        recognized_campers = []
+        for camper in result.get('recognized_campers', []):
+            # Camper ID is now just the number (e.g., "21")
+            camper_id_str = camper['camper_id']
+            camper_id = int(camper_id_str) if camper_id_str.isdigit() else 0
+            
+            recognized_campers.append({
+                "camperId": camper_id,
+                "confidence": 1.0 - camper['distance'],
+                "boundingBox": [
+                    camper['face_region']['x'],
+                    camper['face_region']['y'],
+                    camper['face_region']['width'],
+                    camper['face_region']['height']
+                ]
+            })
+        
+        return jsonify({
+            "success": True,
+            "message": f"Recognized {len(recognized_campers)} camper(s) from group {group_id}",
+            "campId": camp_id,
+            "groupId": group_id,
+            "sessionId": session_id,
+            "recognizedCampers": recognized_campers,
+            "totalFacesDetected": result['total_faces_detected'],
+            "matchedFaces": len(recognized_campers),
+            "processingTimeMs": int(processing_time),
+            "timestamp": get_now().isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error in recognize_faces_for_group: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": str(e),
+            "campId": camp_id,
+            "groupId": group_id,
+            "recognizedCampers": [],
+            "totalFacesDetected": 0
+        }), 500
+    
+    finally:
+        file_handler.cleanup_file(temp_file)
+
+
+# ============================================================================
+# ENDPOINT 6: Recognize Faces for Optional Activity
+# ============================================================================
+
+@app.route('/api/recognition/recognize-activity/<int:camp_id>/<int:activity_schedule_id>', methods=['POST'])
+def recognize_faces_for_activity(camp_id: int, activity_schedule_id: int):
+    """
+    Recognize faces for a specific optional activity
+    Loads only faces from that activity's folder for accurate matching
+    """
+    temp_file = None
+    try:
+        # Validate image
+        if 'photo' not in request.files:
+            return jsonify({
+                "success": False,
+                "message": "No photo file provided",
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Validate file
+        file = request.files['photo']
+        is_valid, error_msg = validate_image_file(file)
+        if not is_valid:
+            return jsonify({
+                "success": False,
+                "message": error_msg,
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Save uploaded file
+        temp_file, error = file_handler.save_uploaded_file(file)
+        if error:
+            return jsonify({
+                "success": False,
+                "message": error,
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Load faces for this specific optional activity
+        activity_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}" / f"camper_activities" / str(activity_schedule_id)
+        
+        # Check if activity folder exists and has images
+        if not activity_folder.exists():
+            logger.error(f"Activity folder not found: {activity_folder}")
+            return jsonify({
+                "success": False,
+                "message": f"Optional activity folder not found. Please preload camp {camp_id} first.",
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        # Check if folder has any images
+        image_files = list(activity_folder.glob("*.jpg"))
+        if not image_files:
+            logger.error(f"Activity folder is empty: {activity_folder}")
+            return jsonify({
+                "success": False,
+                "message": f"Optional activity {activity_schedule_id} has no face data. Please preload camp {camp_id} first.",
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 400
+        
+        logger.info(f"📂 Loading {len(image_files)} faces from optional activity {activity_schedule_id}")
+        
+        # Clear cache and load only this activity's faces
+        face_service.embedding_cache.clear_cache()
+        face_service.embedding_cache._load_embeddings_from_folder(activity_folder)
+        
+        # Generate session ID
+        session_id = str(uuid.uuid4())
+        
+        # Perform recognition
+        start_time = datetime.now()
+        result = face_service.check_attendance(
+            image_path=temp_file,
+            session_id=session_id,
+            preprocess=True,
+            save_results=True
+        )
+        processing_time = (datetime.now() - start_time).total_seconds() * 1000
+        
+        if not result['success']:
+            return jsonify({
+                "success": False,
+                "message": result.get('error', 'Recognition failed'),
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id,
+                "recognizedCampers": [],
+                "totalFacesDetected": 0
+            }), 500
+        
+        # Format response
+        recognized_campers = []
+        for camper in result.get('recognized_campers', []):
+            # Camper ID is now just the number (e.g., "21")
+            camper_id_str = camper['camper_id']
+            camper_id = int(camper_id_str) if camper_id_str.isdigit() else 0
+            
+            recognized_campers.append({
+                "camperId": camper_id,
+                "confidence": 1.0 - camper['distance'],
+                "boundingBox": [
+                    camper['face_region']['x'],
+                    camper['face_region']['y'],
+                    camper['face_region']['width'],
+                    camper['face_region']['height']
+                ]
+            })
+        
+        return jsonify({
+            "success": True,
+            "message": f"Recognized {len(recognized_campers)} camper(s) from optional activity {activity_schedule_id}",
+            "campId": camp_id,
+            "activityScheduleId": activity_schedule_id,
+            "sessionId": session_id,
+            "recognizedCampers": recognized_campers,
+            "totalFacesDetected": result['total_faces_detected'],
+            "matchedFaces": len(recognized_campers),
+            "processingTimeMs": int(processing_time),
+            "timestamp": get_now().isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error in recognize_faces_for_activity: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": str(e),
+            "campId": camp_id,
+            "activityScheduleId": activity_schedule_id,
+            "recognizedCampers": [],
+            "totalFacesDetected": 0
+        }), 500
+    
+    finally:
+        file_handler.cleanup_file(temp_file)
+
+
+# ============================================================================
+# ENDPOINT 7: Recognize Faces for Activity Schedule (Legacy)
 # ============================================================================
 
 @app.route('/api/recognition/recognize/<int:activity_schedule_id>', methods=['POST'])
 def recognize_faces(activity_schedule_id: int):
     """
-    Recognize faces in uploaded photo for a specific activity schedule
+    LEGACY: Recognize faces in uploaded photo for a specific activity schedule
+    Use recognize-group or recognize-activity endpoints instead
     Returns list of recognized campers with confidence scores
     """
     temp_file = None

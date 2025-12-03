@@ -520,10 +520,10 @@ def preload_camp_day():
             camper_ids = activity.get('camperIds', [])
             
             if activity_id and camper_ids:
-                activity_path = camp_db_path / "camper_activities" / activity_id
+                activity_path = camp_db_path / "camper_activities" / str(activity_id)
                 count, message = supabase_service.sync_optional_activity(
                     camp_id=camp_id,
-                    activity_id=activity_id,
+                    activity_id=str(activity_id),
                     camper_ids=camper_ids,
                     local_folder=activity_path
                 )
@@ -539,7 +539,7 @@ def preload_camp_day():
         for activity in optional_activities:
             activity_id = activity.get('activityId')
             if activity_id:
-                activity_path = camp_db_path / "camper_activities" / activity_id
+                activity_path = camp_db_path / "camper_activities" / str(activity_id)
                 face_service.embedding_cache._load_embeddings_from_folder(activity_path)
         
         total_campers = core_count + sum(r['downloaded'] for r in optional_results)
