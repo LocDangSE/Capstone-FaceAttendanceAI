@@ -459,11 +459,16 @@ def recognize_faces_for_group(camp_id: int, group_id: int):
                 "totalFacesDetected": 0
             }), 400
         
-        logger.info(f"📂 Loading {len(image_files)} faces from group {group_id}")
+        logger.info(f"📂 Using {len(image_files)} pre-loaded faces from group {group_id}")
         
-        # Clear cache and load only this group's faces
-        face_service.embedding_cache.clear_cache()
-        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+        # ✅ OPTIMIZATION: Skip redundant cache reload if embeddings already loaded
+        cache_stats = face_service.embedding_cache.get_cache_stats()
+        if cache_stats['total_cached'] == 0:
+            # Only load if cache is empty
+            logger.info(f"⚡ Loading embeddings into cache...")
+            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+        else:
+            logger.info(f"⚡ Using {cache_stats['total_cached']} cached embeddings (skip reload)")
         
         # Generate session ID
         session_id = str(uuid.uuid4())

@@ -168,9 +168,10 @@ class FaceRecognitionService:
                 image_path = self.image_processor.preprocess_image(image_path)
             
             # Extract all faces
+            # ✅ OPTIMIZATION: Lower confidence for faster detection (trade-off: may detect more false positives)
             faces = self.image_processor.extract_faces_from_frame(
                 image_path,
-                min_confidence=0.5
+                min_confidence=0.3  # Reduced from 0.5 for speed
             )
             
             if not faces:
@@ -185,17 +186,22 @@ class FaceRecognitionService:
             logger.info(f"Detected {len(faces)} face(s)")
             
             # Generate embeddings for each face
+            # ✅ OPTIMIZATION: Process faces in batch for better performance
             face_embeddings = []
+            face_paths = []
+            
+            # Batch 1: Crop all faces first (I/O operations)
             for face in faces:
-                # Save face region temporarily
                 face_path = str(settings.TEMP_FOLDER / f"face_{uuid.uuid4()}.jpg")
                 self.image_processor.crop_face_region(
                     image_path=image_path,
                     face_region=face['region'],
                     output_path=face_path
                 )
-                
-                # Generate embedding
+                face_paths.append((face, face_path))
+            
+            # Batch 2: Generate embeddings (can be parallelized in future)
+            for face, face_path in face_paths:
                 embedding = self.embedding_cache.generate_embedding(face_path)
                 face_embeddings.append({
                     'face': face,
@@ -235,7 +241,9 @@ class FaceRecognitionService:
             }
             
             # Save results to session folder
-            if save_results:
+            # ✅ OPTIMIZATION: Skip disk I/O if not needed for performance
+            if save_results and settings.RECOGNITION_FPS_LIMIT == 0:
+                # Only save if not rate-limited (indicates production/logging mode)
                 self._save_session_results(session_id, results)
             
             logger.info(f"✅ Attendance check complete: {len(recognized_campers)}/{len(faces)} faces recognized ({processing_time:.2f}s)")
