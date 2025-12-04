@@ -134,20 +134,8 @@ def validate_activity_schedule_id(activity_schedule_id: str) -> Tuple[bool, Opti
     return True, None
 
 
-def validate_confidence_threshold(threshold: float) -> Tuple[bool, Optional[str]]:
-    """
-    Validate confidence threshold value
-    
-    Args:
-        threshold: Threshold value
-        
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
-    if not 0.0 <= threshold <= 1.0:
-        return False, "Confidence threshold must be between 0.0 and 1.0"
-    
-    return True, None
+# REMOVED: validate_confidence_threshold
+# ConfidenceThreshold is now ONLY read from .env via config/settings.py
 
 
 def sanitize_filename(filename: str) -> str:

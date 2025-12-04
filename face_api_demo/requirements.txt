@@ -3,10 +3,15 @@ flask==3.0.3
 flask-cors==5.0.0
 werkzeug==3.0.6
 
+# JWT Authentication (Production-Ready)
+PyJWT==2.9.0  # JWT token validation and parsing
+cryptography==44.0.0  # For RS256/ES256 asymmetric algorithms (optional)
+
 # Deep Learning & Face Recognition
 deepface==0.0.93
 tensorflow==2.17.1
 tf-keras==2.17.0
+protobuf==4.25.3  # Required for TensorFlow 2.17.1 compatibility
 
 # Configuration Management
 pydantic==2.10.3
@@ -34,3 +39,6 @@ pytest-cov==6.0.0
 
 # Production Server
 gunicorn==23.0.0  # Production WSGI server
+
+# Swagger/OpenAPI (Manual implementation)
+# Note: Spectree removed due to Pydantic v2 incompatibility

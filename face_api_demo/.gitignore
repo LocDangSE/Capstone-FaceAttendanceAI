@@ -57,3 +57,18 @@ Thumbs.db
 !sessions/.gitkeep
 !embeddings/.gitkeep
 !face_database/.gitkeep
+
+# Additional production ignores
+instance/
+.cache/
+download_tmp/
+supabase_sync/
+openapi_backup/
+attendance-sessions-receipts/
+*.tsbuildinfo
+vite.config.js.timestamp-*
+
+# React/Node (if exists)
+node_modules/
+dist/
+build/
