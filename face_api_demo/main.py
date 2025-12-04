@@ -62,11 +62,11 @@ CORS(app,
 # Using manual OpenAPI documentation instead
 
 # Initialize JWT middleware
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'dev-secret-CHANGE-IN-PRODUCTION')
-app.config['JWT_ALGORITHM'] = os.getenv('JWT_ALGORITHM', 'HS256')
-app.config['JWT_ISSUER'] = os.getenv('JWT_ISSUER', 'SummerCampBackend')
-app.config['JWT_AUDIENCE'] = os.getenv('JWT_AUDIENCE', 'face-recognition-api')
-app.config['JWT_ISSUER_WHITELIST'] = [os.getenv('JWT_ISSUER', 'SummerCampBackend')]
+app.config['JWT_SECRET_KEY'] = settings.JWT_SECRET_KEY
+app.config['JWT_ALGORITHM'] = settings.JWT_ALGORITHM
+app.config['JWT_ISSUER'] = settings.JWT_ISSUER
+app.config['JWT_AUDIENCE'] = settings.JWT_AUDIENCE
+app.config['JWT_ISSUER_WHITELIST'] = [settings.JWT_ISSUER]
 app.config['JWT_CLOCK_SKEW_SECONDS'] = 60
 app.config['JWT_ENABLE_CLOUDFLARE_HEADERS'] = True
 
@@ -548,13 +548,10 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        # Cache optimization: skip reload if embeddings already in memory
-        cache_stats = face_service.embedding_cache.get_cache_stats()
-        if cache_stats['total_cached'] == 0:
-            logger.info(f"⚡ Loading embeddings into cache for group {group_id}...")
-            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-        else:
-            logger.info(f"⚡ Using {cache_stats['total_cached']} cached embeddings (skip reload)")
+        # Clear cache and load only this group's embeddings for accurate group-specific recognition
+        face_service.embedding_cache.clear_cache()
+        logger.info(f"⚡ Loading embeddings for group {group_id} only...")
+        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
         
         session_id = str(uuid.uuid4())
         
@@ -663,13 +660,10 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
                 "activityScheduleId": activity_schedule_id
             }), 404
         
-        # Load embeddings for this activity only
-        cache_stats = face_service.embedding_cache.get_cache_stats()
-        if cache_stats['total_cached'] == 0:
-            logger.info(f"⚡ Loading embeddings for activity {activity_schedule_id}...")
-            face_service.embedding_cache._load_embeddings_from_folder(activity_folder)
-        else:
-            logger.info(f"⚡ Using {cache_stats['total_cached']} cached embeddings")
+        # Clear cache and load only this activity's embeddings for accurate activity-specific recognition
+        face_service.embedding_cache.clear_cache()
+        logger.info(f"⚡ Loading embeddings for activity {activity_schedule_id} only...")
+        face_service.embedding_cache._load_embeddings_from_folder(activity_folder)
         
         session_id = str(uuid.uuid4())
         
