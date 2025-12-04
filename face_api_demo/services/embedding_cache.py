@@ -94,7 +94,20 @@ class EmbeddingCache:
             
             for image_file in image_files:
                 try:
-                    camper_id = image_file.stem  # Filename without extension
+                    # Extract camper ID from filename
+                    # Format: avatar_21_avatar_uuid.jpg -> camper_id = 21
+                    # Or: 21.jpg -> camper_id = 21
+                    filename = image_file.stem
+                    if filename.startswith('avatar_'):
+                        # Extract number after first 'avatar_'
+                        import re
+                        match = re.match(r'avatar_(\d+)', filename)
+                        if match:
+                            camper_id = match.group(1)
+                        else:
+                            camper_id = filename
+                    else:
+                        camper_id = filename
                     
                     # Generate embedding if not cached
                     if camper_id not in self.cache:

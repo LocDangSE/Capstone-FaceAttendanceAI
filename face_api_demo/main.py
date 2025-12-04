@@ -50,7 +50,13 @@ logger = setup_logging(log_level="INFO" if not settings.FLASK_DEBUG else "DEBUG"
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+
+# Configure CORS with explicit settings
+CORS(app, 
+     resources={r"/*": {"origins": "*"}},
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     supports_credentials=False)
 
 # Note: Spectree removed due to Pydantic v2 compatibility issues
 # Using manual OpenAPI documentation instead
@@ -92,23 +98,26 @@ logger.info("="*60)
 def health_check():
     """Health check endpoint with system statistics"""
     try:
-        cache_stats = face_service.get_cache_statistics()
+        # Get cache statistics from embedding cache
+        cached_campers = list(face_service.embedding_cache.cache.keys())
         
         response = HealthResponse(
             status="healthy",
             service="Face Recognition API",
             model=settings.DEEPFACE_MODEL,
             cache_stats=CacheStats(
-                total_campers=cache_stats.get('total_campers', 0),
-                memory_usage_mb=cache_stats.get('memory_usage_mb', 0),
-                last_updated=cache_stats.get('last_updated')
+                total_cached=len(cached_campers),
+                campers=cached_campers,
+                model=settings.DEEPFACE_MODEL,
+                distance_metric=settings.DEEPFACE_DISTANCE_METRIC,
+                fps_limit=settings.RECOGNITION_FPS_LIMIT,
+                threshold=settings.CONFIDENCE_THRESHOLD
             ),
             timestamp=get_now().isoformat()
         )
         
-        response_dict = response.dict()
+        response_dict = response.model_dump()
         response_dict['loaded_camps'] = len(loaded_camps)
-        response_dict['confidence_threshold'] = settings.CONFIDENCE_THRESHOLD
         
         return jsonify(response_dict), 200
     
@@ -171,7 +180,8 @@ def openapi_spec():
             "description": "Production-ready face recognition API with JWT authentication and latency-optimized processing"
         },
         "servers": [
-            {"url": f"http://{settings.FLASK_HOST}:{settings.FLASK_PORT}", "description": "Local server"}
+            {"url": f"http://localhost:{settings.FLASK_PORT}", "description": "Local server"},
+            {"url": f"http://127.0.0.1:{settings.FLASK_PORT}", "description": "Local server (IP)"}
         ],
         "components": {
             "securitySchemes": {
@@ -370,7 +380,7 @@ def load_camp_face_database(camp_id):
         for group_id, face_files in groups_data.items():
             group_folder = camp_folder / f"camper_group_{group_id}"
             logger.info(f"⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
-            face_service.embedding_cache._load_embeddings_from_folder(str(group_folder))
+            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
             total_faces += len(face_files)
         
         loaded_camps[camp_id] = {
@@ -453,10 +463,19 @@ def unload_camp_face_database(camp_id):
 def get_camp_stats():
     """Get statistics about loaded camps"""
     try:
+        cached_campers = list(face_service.embedding_cache.cache.keys())
+        
         return jsonify({
             "loaded_camps": loaded_camps,
             "total_camps": len(loaded_camps),
-            "cache_stats": face_service.get_cache_statistics()
+            "cache_stats": {
+                "total_cached": len(cached_campers),
+                "campers": cached_campers,
+                "model": settings.DEEPFACE_MODEL,
+                "distance_metric": settings.DEEPFACE_DISTANCE_METRIC,
+                "fps_limit": settings.RECOGNITION_FPS_LIMIT,
+                "threshold": settings.CONFIDENCE_THRESHOLD
+            }
         }), 200
     
     except Exception as e:
@@ -509,7 +528,14 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 400
         
-        temp_file = file_handler.save_uploaded_file(file, "recognition")
+        temp_file, error = file_handler.save_uploaded_file(file, "recognition")
+        if error:
+            return jsonify({
+                "success": False,
+                "message": f"Error saving uploaded file: {error}",
+                "campId": camp_id,
+                "groupId": group_id
+            }), 500
         
         # Load embeddings for this specific group only
         group_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}" / f"camper_group_{group_id}"
@@ -526,14 +552,14 @@ def recognize_faces_for_group(camp_id, group_id):
         cache_stats = face_service.embedding_cache.get_cache_stats()
         if cache_stats['total_cached'] == 0:
             logger.info(f"⚡ Loading embeddings into cache for group {group_id}...")
-            face_service.embedding_cache._load_embeddings_from_folder(str(group_folder))
+            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
         else:
             logger.info(f"⚡ Using {cache_stats['total_cached']} cached embeddings (skip reload)")
         
         session_id = str(uuid.uuid4())
         
         # Recognize faces with optimized threshold from .env
-        result = face_service.recognize_faces_in_image(
+        result = face_service.check_attendance(
             str(temp_file),
             session_id=session_id,
             save_results=False
@@ -542,10 +568,10 @@ def recognize_faces_for_group(camp_id, group_id):
         recognized_campers = [
             {
                 "camperId": int(r['camper_id']),
-                "confidence": r['confidence'],
-                "boundingBox": r.get('bbox', [])
+                "confidence": round(1.0 - r['distance'], 4),  # Convert distance to confidence
+                "boundingBox": r.get('face_region', [])
             }
-            for r in result.get('recognized', [])
+            for r in result.get('recognized_campers', [])
         ]
         
         logger.info(f"✅ Recognized {len(recognized_campers)} camper(s) from group {group_id}")
@@ -557,7 +583,7 @@ def recognize_faces_for_group(camp_id, group_id):
             "groupId": group_id,
             "sessionId": session_id,
             "recognizedCampers": recognized_campers,
-            "totalFacesDetected": result.get('total_faces', 0),
+            "totalFacesDetected": result.get('total_faces_detected', 0),
             "matchedFaces": len(recognized_campers),
             "processingTimeMs": int(result.get('processing_time', 0) * 1000),
             "timestamp": get_now().isoformat()
@@ -613,7 +639,14 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
                 "activityScheduleId": activity_schedule_id
             }), 400
         
-        temp_file = file_handler.save_uploaded_file(file, "recognition")
+        temp_file, error = file_handler.save_uploaded_file(file, "recognition")
+        if error:
+            return jsonify({
+                "success": False,
+                "message": f"Error saving uploaded file: {error}",
+                "campId": camp_id,
+                "activityScheduleId": activity_schedule_id
+            }), 500
         
         activity_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}" / f"activity_{activity_schedule_id}"
         
@@ -702,7 +735,12 @@ def detect_faces():
                 total_faces=0
             ).dict()), 400
         
-        temp_file = file_handler.save_uploaded_file(file, "detect")
+        temp_file, error = file_handler.save_uploaded_file(file, "detect")
+        if error:
+            return jsonify({
+                "success": False,
+                "message": f"Error saving uploaded file: {error}"
+            }), 500
         
         faces = face_service.image_processor.extract_faces_from_frame(str(temp_file))
         

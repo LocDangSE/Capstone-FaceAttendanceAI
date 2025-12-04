@@ -237,6 +237,87 @@ class SupabaseService:
             logger.error(error_msg)
             raise Exception(error_msg)
     
+    def download_camp_faces(self, camp_id: int, local_folder: str) -> List[str]:
+        """
+        Download all face images for a camp from Supabase
+        
+        Args:
+            camp_id: Camp ID
+            local_folder: Local folder path to save images
+            
+        Returns:
+            List of downloaded file paths
+        """
+        if not self.is_enabled():
+            logger.warning("⚠️ Supabase not enabled, skipping download")
+            return []
+        
+        try:
+            local_path = Path(local_folder)
+            local_path.mkdir(parents=True, exist_ok=True)
+            
+            # List all camper_group folders under camp_{camp_id}
+            camp_folder_items = self.list_files(f"camp_{camp_id}/")
+            
+            camper_group_folders = [
+                item.get('name', '') for item in camp_folder_items
+                if item.get('name', '').startswith('camper_group_')
+            ]
+            
+            if not camper_group_folders:
+                logger.warning(f"⚠️ No camper_group folders found for camp {camp_id}")
+                return []
+            
+            logger.info(f"Found {len(camper_group_folders)} camper groups for camp {camp_id}")
+            
+            downloaded_files = []
+            
+            # Download from each camper_group folder
+            for group_folder in camper_group_folders:
+                try:
+                    # Create local group folder
+                    group_local_path = local_path / group_folder
+                    group_local_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # List files in cloud group folder
+                    group_cloud_path = f"camp_{camp_id}/{group_folder}/"
+                    group_files = self.list_files(group_cloud_path)
+                    
+                    # Filter for avatar images
+                    avatar_files = [
+                        f for f in group_files
+                        if f.get('name', '').startswith('avatar_') and 
+                           f.get('name', '').lower().endswith(('.jpg', '.jpeg', '.png'))
+                    ]
+                    
+                    logger.info(f"  Downloading {len(avatar_files)} faces from {group_folder}")
+                    
+                    # Download each avatar
+                    for avatar_file in avatar_files:
+                        try:
+                            filename = avatar_file.get('name', '')
+                            remote_path = f"{group_cloud_path}{filename}"
+                            local_file_path = str(group_local_path / filename)
+                            
+                            success, error = self.download_file(remote_path, local_file_path)
+                            if success:
+                                downloaded_files.append(local_file_path)
+                            else:
+                                logger.warning(f"    Failed to download {filename}: {error}")
+                        
+                        except Exception as e:
+                            logger.error(f"    Error downloading {avatar_file.get('name', '')}: {e}")
+                
+                except Exception as e:
+                    logger.error(f"  Error processing group {group_folder}: {e}")
+            
+            logger.info(f"✅ Downloaded {len(downloaded_files)} face images for camp {camp_id}")
+            return downloaded_files
+        
+        except Exception as e:
+            logger.error(f"❌ Error downloading camp faces: {e}")
+            return []
+    
     def sync_activity_schedule_campers(
         self,
         activity_schedule_id: str,

@@ -15,7 +15,7 @@ Security Features:
 
 import jwt
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from typing import Optional, Dict, Any, List
 from flask import request, jsonify, g
@@ -161,7 +161,7 @@ class JWTAuthMiddleware:
             now = datetime.now(timezone.utc)
             
             # Allow clock skew
-            if iat_datetime > now + datetime.timedelta(seconds=self.clock_skew_seconds):
+            if iat_datetime > now + timedelta(seconds=self.clock_skew_seconds):
                 logger.warning(f"Token issued in future: {iat_datetime.isoformat()}")
                 return False, "Token issued in future (check system clock)"
         
@@ -172,7 +172,7 @@ class JWTAuthMiddleware:
             now = datetime.now(timezone.utc)
             
             # Token not yet valid
-            if nbf_datetime > now + datetime.timedelta(seconds=self.clock_skew_seconds):
+            if nbf_datetime > now + timedelta(seconds=self.clock_skew_seconds):
                 logger.warning(f"Token not yet valid: {nbf_datetime.isoformat()}")
                 return False, f"Token not yet valid (nbf: {nbf_datetime.isoformat()})"
         
@@ -228,6 +228,28 @@ class JWTAuthMiddleware:
             Tuple of (is_valid, payload, error_message)
         """
         try:
+            # Log token details for debugging (using ERROR level to ensure visibility)
+            logger.error(f"[JWT DEBUG] Verifying token (first 50 chars): {token[:50]}...")
+            logger.error(f"[JWT DEBUG] Secret key length: {len(self.secret_key)}")
+            logger.error(f"[JWT DEBUG] Secret key (full): {self.secret_key}")
+            logger.error(f"[JWT DEBUG] Algorithm: {self.algorithm}")
+            logger.error(f"[JWT DEBUG] Required audience: {self.required_audience}")
+            logger.error(f"[JWT DEBUG] Required issuer: {self.required_issuer}")
+            
+            # Decode header without verification to inspect claims
+            try:
+                unverified_header = jwt.get_unverified_header(token)
+                unverified_payload = jwt.decode(token, options={"verify_signature": False})
+                logger.error(f"[JWT DEBUG] Token header: {unverified_header}")
+                logger.error(f"[JWT DEBUG] Token issuer: {unverified_payload.get('iss')}")
+                logger.error(f"[JWT DEBUG] Token audience: {unverified_payload.get('aud')}")
+                logger.error(f"[JWT DEBUG] Token subject: {unverified_payload.get('sub')}")
+                logger.error(f"[JWT DEBUG] Token exp: {unverified_payload.get('exp')}")
+                logger.error(f"[JWT DEBUG] Token iat: {unverified_payload.get('iat')}")
+                logger.error(f"[JWT DEBUG] Token nbf: {unverified_payload.get('nbf')}")
+            except Exception as e:
+                logger.error(f"Failed to decode token without verification: {e}")
+            
             # Decode and verify JWT signature + expiration
             verification_key = self._get_verification_key()
             

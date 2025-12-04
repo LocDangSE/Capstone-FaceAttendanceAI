@@ -24,7 +24,7 @@ class FileHandler:
     @staticmethod
     def save_uploaded_file(
         file: FileStorage,
-        folder: Optional[Path] = None,
+        folder = None,
         custom_filename: Optional[str] = None
     ) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -32,7 +32,7 @@ class FileHandler:
         
         Args:
             file: Uploaded file object
-            folder: Destination folder (default: TEMP_FOLDER)
+            folder: Destination folder (default: TEMP_FOLDER) - can be Path or str
             custom_filename: Custom filename (if None, generates unique name)
             
         Returns:
@@ -45,6 +45,11 @@ class FileHandler:
             # Determine destination folder
             if folder is None:
                 folder = settings.TEMP_FOLDER
+            elif isinstance(folder, str):
+                # Convert string to Path relative to TEMP_FOLDER
+                folder = settings.TEMP_FOLDER / folder
+            elif not isinstance(folder, Path):
+                folder = Path(folder)
             
             # Ensure folder exists
             folder.mkdir(parents=True, exist_ok=True)

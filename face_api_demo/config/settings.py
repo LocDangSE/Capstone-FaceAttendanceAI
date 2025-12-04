@@ -8,6 +8,11 @@ from pydantic import Field, field_validator
 from pathlib import Path
 from typing import Optional
 import os
+from dotenv import load_dotenv
+
+# Explicitly load .env file from the project root
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 
 class Settings(BaseSettings):
@@ -23,6 +28,12 @@ class Settings(BaseSettings):
     SUPABASE_KEY: str = Field(default="", description="Supabase anon/public key")
     SUPABASE_BUCKET: str = Field(default="attendance-sessions", description="Supabase storage bucket for attendance sessions")
     SUPABASE_ENABLED: bool = Field(default=False, description="Enable Supabase cloud storage")
+    
+    # ==================== JWT Authentication Settings ====================
+    JWT_SECRET_KEY: str = Field(default="dev-secret-CHANGE-IN-PRODUCTION", description="JWT secret key (must match .NET backend)")
+    JWT_ALGORITHM: str = Field(default="HS256", description="JWT signing algorithm")
+    JWT_ISSUER: str = Field(default="SummerCampBackend", description="JWT token issuer")
+    JWT_AUDIENCE: str = Field(default="face-recognition-api", description="JWT token audience")
     
     # ==================== DeepFace Settings ====================
     DEEPFACE_MODEL: str = Field(default="Facenet512", description="Face recognition model")
@@ -136,7 +147,6 @@ class Settings(BaseSettings):
     
     class Config:
         """Pydantic config"""
-        env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = True
 
