@@ -569,7 +569,12 @@ def recognize_faces_for_group(camp_id, group_id):
             {
                 "camperId": int(r['camper_id']),
                 "confidence": round(1.0 - r['distance'], 4),  # Convert distance to confidence
-                "boundingBox": r.get('face_region', [])
+                "boundingBox": [
+                    r['face_region']['x'],
+                    r['face_region']['y'],
+                    r['face_region']['width'],
+                    r['face_region']['height']
+                ] if 'face_region' in r and r['face_region'] else None
             }
             for r in result.get('recognized_campers', [])
         ]
@@ -662,13 +667,13 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
         cache_stats = face_service.embedding_cache.get_cache_stats()
         if cache_stats['total_cached'] == 0:
             logger.info(f"⚡ Loading embeddings for activity {activity_schedule_id}...")
-            face_service.embedding_cache._load_embeddings_from_folder(str(activity_folder))
+            face_service.embedding_cache._load_embeddings_from_folder(activity_folder)
         else:
             logger.info(f"⚡ Using {cache_stats['total_cached']} cached embeddings")
         
         session_id = str(uuid.uuid4())
         
-        result = face_service.recognize_faces_in_image(
+        result = face_service.check_attendance(
             str(temp_file),
             session_id=session_id,
             save_results=False
@@ -677,10 +682,15 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
         recognized_campers = [
             {
                 "camperId": int(r['camper_id']),
-                "confidence": r['confidence'],
-                "boundingBox": r.get('bbox', [])
+                "confidence": round(1.0 - r['distance'], 4),
+                "boundingBox": [
+                    r['face_region']['x'],
+                    r['face_region']['y'],
+                    r['face_region']['width'],
+                    r['face_region']['height']
+                ] if 'face_region' in r and r['face_region'] else None
             }
-            for r in result.get('recognized', [])
+            for r in result.get('recognized_campers', [])
         ]
         
         logger.info(f"✅ Recognized {len(recognized_campers)} camper(s) for activity {activity_schedule_id}")
