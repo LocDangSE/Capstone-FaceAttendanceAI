@@ -38,6 +38,7 @@ class JWTAuthMiddleware:
         required_audience: str = "face-recognition-api",
         public_key: Optional[str] = None,
         issuer_whitelist: Optional[List[str]] = None,
+        audience_whitelist: Optional[List[str]] = None,
         clock_skew_seconds: int = 60,
         enable_cloudflare_headers: bool = True
     ):
@@ -51,6 +52,7 @@ class JWTAuthMiddleware:
             required_audience: Expected audience claim (this service's identifier)
             public_key: RSA/ECDSA public key for asymmetric algorithms (optional)
             issuer_whitelist: List of allowed issuers (defaults to [required_issuer])
+            audience_whitelist: List of allowed audiences (defaults to [required_audience])
             clock_skew_seconds: Allowed time drift for exp/nbf validation (default 60s)
             enable_cloudflare_headers: Parse Cloudflare security headers (CF-Access-*)
         """
@@ -60,6 +62,7 @@ class JWTAuthMiddleware:
         self.required_audience = required_audience
         self.public_key = public_key
         self.issuer_whitelist = issuer_whitelist or [required_issuer]
+        self.audience_whitelist = audience_whitelist or [required_audience]
         self.clock_skew_seconds = clock_skew_seconds
         self.enable_cloudflare_headers = enable_cloudflare_headers
         
@@ -142,9 +145,11 @@ class JWTAuthMiddleware:
         
         # Handle both string and list audience claims
         audience_list = [aud] if isinstance(aud, str) else aud
-        if self.required_audience not in audience_list:
+        
+        # Check if any audience in the token matches our whitelist
+        if not any(aud_claim in self.audience_whitelist for aud_claim in audience_list):
             logger.warning(
-                f"Invalid audience: {aud} (expected: {self.required_audience})"
+                f"Invalid audience: {aud} (expected one of: {self.audience_whitelist})"
             )
             return False, f"Invalid audience: {aud}"
         
@@ -257,7 +262,7 @@ class JWTAuthMiddleware:
                 token,
                 verification_key,
                 algorithms=[self.algorithm],
-                audience=self.required_audience,
+                audience=self.audience_whitelist,  # Accept any audience in whitelist
                 options={
                     'require_exp': True,  # Require expiration
                     'require_iat': True,  # Require issued-at
@@ -385,6 +390,7 @@ def init_jwt_middleware(
         'required_audience': app.config.get('JWT_AUDIENCE', 'face-recognition-api'),
         'public_key': app.config.get('JWT_PUBLIC_KEY'),
         'issuer_whitelist': app.config.get('JWT_ISSUER_WHITELIST'),
+        'audience_whitelist': app.config.get('JWT_AUDIENCE_WHITELIST'),
         'clock_skew_seconds': app.config.get('JWT_CLOCK_SKEW_SECONDS', 60),
         'enable_cloudflare_headers': app.config.get('JWT_ENABLE_CLOUDFLARE_HEADERS', True),
     }

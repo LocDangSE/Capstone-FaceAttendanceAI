@@ -66,7 +66,9 @@ app.config['JWT_SECRET_KEY'] = settings.JWT_SECRET_KEY
 app.config['JWT_ALGORITHM'] = settings.JWT_ALGORITHM
 app.config['JWT_ISSUER'] = settings.JWT_ISSUER
 app.config['JWT_AUDIENCE'] = settings.JWT_AUDIENCE
-app.config['JWT_ISSUER_WHITELIST'] = [settings.JWT_ISSUER]
+# Accept tokens from both .NET user login and Python API service
+app.config['JWT_ISSUER_WHITELIST'] = [settings.JWT_ISSUER, "https://localhost:7075"]
+app.config['JWT_AUDIENCE_WHITELIST'] = [settings.JWT_AUDIENCE, "https://localhost:7075"]
 app.config['JWT_CLOCK_SKEW_SECONDS'] = 60
 app.config['JWT_ENABLE_CLOUDFLARE_HEADERS'] = True
 
@@ -817,19 +819,45 @@ def unauthorized(error):
     }), 401
 
 
+@app.route('/ready')
+def ready():
+    """Readiness probe for Kubernetes/Render"""
+    try:
+        # Check if models and services are loaded
+        if face_service and supabase_service:
+            return jsonify({
+                "status": "ready",
+                "model": settings.DEEPFACE_MODEL,
+                "cached_embeddings": face_service.embedding_cache.get_cache_stats()['total_cached'],
+                "timestamp": get_now().isoformat()
+            }), 200
+        return jsonify({"status": "not_ready"}), 503
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 503
+
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
 
 if __name__ == '__main__':
+    # Get configuration from environment (Render sets PORT env var)
+    port = int(os.getenv('PORT', settings.FLASK_PORT))
+    host = os.getenv('HOST', settings.FLASK_HOST)
+    debug = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+    
     logger.info("="*60)
     logger.info("✅ All services initialized successfully")
-    logger.info(f"🌐 Starting Flask server on {settings.FLASK_HOST}:{settings.FLASK_PORT}")
-    logger.info(f"📚 Swagger UI available at: http://{settings.FLASK_HOST}:{settings.FLASK_PORT}/apidoc")
+    logger.info(f"🌐 Starting Flask server on {host}:{port}")
+    logger.info(f"📚 Swagger UI available at: http://{host}:{port}/apidoc")
+    logger.info(f"🔍 Health check: http://{host}:{port}/health")
+    logger.info(f"✅ Readiness check: http://{host}:{port}/ready")
     logger.info("="*60)
     
     app.run(
-        host=settings.FLASK_HOST,
-        port=settings.FLASK_PORT,
-        debug=settings.FLASK_DEBUG
+        host=host,
+        port=port,
+        debug=debug,
+        threaded=True
     )
