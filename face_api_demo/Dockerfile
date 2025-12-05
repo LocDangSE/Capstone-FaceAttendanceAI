@@ -36,13 +36,15 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:10000/health', timeout=5)" || exit 1
 
-# Run gunicorn
-CMD gunicorn -w 2 -b 0.0.0.0:$PORT \
-    --timeout 300 \
-    --graceful-timeout 300 \
+# Run gunicorn - optimized for Railway Hobby plan (8GB RAM, 8 vCPU)
+CMD gunicorn -w 4 -b 0.0.0.0:$PORT \
+    --timeout 120 \
+    --graceful-timeout 120 \
     --keep-alive 5 \
-    --max-requests 100 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
     --worker-class sync \
+    --worker-tmp-dir /dev/shm \
     --log-level info \
     --access-logfile - \
     --error-logfile - \
