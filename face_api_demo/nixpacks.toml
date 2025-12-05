@@ -2,16 +2,19 @@
 nixPkgs = [
   "python311",
   "libGL",
-  "glib", 
+  "glib",
   "libxcrypt-legacy",
   "stdenv.cc.cc.lib",
-  "zlib"
+  "zlib",
+  "openssl",
+  "ffmpeg",
+  "gcc"
 ]
 
 [phases.install]
 cmds = [
   "python -m venv /opt/venv",
-  ". /opt/venv/bin/activate && pip install -r requirements.txt"
+  "source /opt/venv/bin/activate && pip install -r requirements.txt"
 ]
 
 [phases.build]
@@ -20,7 +23,7 @@ cmds = [
 ]
 
 [start]
-cmd = ". /opt/venv/bin/activate && gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 300 --graceful-timeout 300 --keep-alive 5 --max-requests 100 --worker-class sync --preload --log-level info --access-logfile - --error-logfile - main:app"
+cmd = "source /opt/venv/bin/activate && gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 300 --graceful-timeout 300 --keep-alive 5 --max-requests 100 --worker-class sync --log-level info --access-logfile - --error-logfile - main:app"
 
 [variables]
 PYTHONUNBUFFERED = "1"
