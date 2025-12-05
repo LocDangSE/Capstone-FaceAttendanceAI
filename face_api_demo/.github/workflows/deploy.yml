@@ -1,4 +1,4 @@
-name: Deploy to Render
+name: Deploy to Railway
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   test:
@@ -19,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.11.9'
 
       - name: Install dependencies
         run: |
@@ -45,19 +46,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy to Render
-        uses: johnbeynon/render-deploy-action@v0.0.8
-        with:
-          service-id: ${{ secrets.RENDER_SERVICE_ID }}
-          api-key: ${{ secrets.RENDER_API_KEY }}
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        run: railway up --service ${{ secrets.RAILWAY_SERVICE_NAME }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       - name: Wait for deployment
-        run: sleep 60
+        run: sleep 90
 
       - name: Health check
         run: |
-          curl --fail ${{ secrets.RENDER_SERVICE_URL }}/health || exit 1
+          curl --retry 5 --retry-delay 10 --fail ${{ secrets.RAILWAY_SERVICE_URL }}/health || exit 1
+
+      - name: Readiness check
+        run: |
+          curl --retry 3 --retry-delay 5 --fail ${{ secrets.RAILWAY_SERVICE_URL }}/ready || exit 1
 
       - name: Notify deployment success
         if: success()
-        run: echo "Deployment successful to ${{ secrets.RENDER_SERVICE_URL }}"
+        run: echo "✅ Deployment successful to ${{ secrets.RAILWAY_SERVICE_URL }}"
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed. Check Railway logs at https://railway.app"
+          exit 1
