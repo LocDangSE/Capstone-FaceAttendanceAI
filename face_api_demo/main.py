@@ -884,9 +884,9 @@ def ready():
 # ============================================================================
 
 if __name__ == '__main__':
-    # Get configuration from environment (Render sets PORT env var)
-    port = int(os.getenv('PORT', settings.FLASK_PORT))
-    host = os.getenv('HOST', settings.FLASK_HOST)
+    # Get port from environment (Railway, Render, etc.)
+    port = int(os.getenv('PORT', os.getenv('FLASK_PORT', settings.FLASK_PORT)))
+    host = os.getenv('FLASK_HOST', settings.FLASK_HOST)
     debug = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
     
     logger.info("="*60)
@@ -901,5 +901,6 @@ if __name__ == '__main__':
         host=host,
         port=port,
         debug=debug,
-        threaded=True
+        threaded=True,
+        use_reloader=False  # Important for production
     )
