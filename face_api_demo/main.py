@@ -189,6 +189,11 @@ def api_documentation():
 @app.route('/openapi.json', methods=['GET'])
 def openapi_spec():
     """OpenAPI 3.0 specification"""
+    # Dynamically determine server URL based on request
+    scheme = request.headers.get('X-Forwarded-Proto', request.scheme)
+    host = request.headers.get('X-Forwarded-Host', request.host)
+    base_url = f"{scheme}://{host}"
+    
     spec = {
         "openapi": "3.0.0",
         "info": {
@@ -197,8 +202,9 @@ def openapi_spec():
             "description": "Production-ready face recognition API with JWT authentication and latency-optimized processing"
         },
         "servers": [
-            {"url": f"http://localhost:{settings.FLASK_PORT}", "description": "Local server"},
-            {"url": f"http://127.0.0.1:{settings.FLASK_PORT}", "description": "Local server (IP)"}
+            {"url": base_url, "description": "Current server"},
+            {"url": f"http://localhost:{settings.FLASK_PORT}", "description": "Local development"},
+            {"url": f"http://127.0.0.1:{settings.FLASK_PORT}", "description": "Local development (IP)"}
         ],
         "components": {
             "securitySchemes": {
