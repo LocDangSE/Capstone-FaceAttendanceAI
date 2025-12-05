@@ -1,5 +1,12 @@
 [phases.setup]
-nixPkgs = ["python311"]
+nixPkgs = [
+  "python311",
+  "libGL",
+  "glib", 
+  "libxcrypt-legacy",
+  "stdenv.cc.cc.lib",
+  "zlib"
+]
 
 [phases.install]
 cmds = [
@@ -18,3 +25,4 @@ cmd = ". /opt/venv/bin/activate && gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 300 
 [variables]
 PYTHONUNBUFFERED = "1"
 FLASK_ENV = "production"
+LD_LIBRARY_PATH = "/nix/store/*-gcc-*/lib"
