@@ -67,8 +67,8 @@ app.config['JWT_ALGORITHM'] = settings.JWT_ALGORITHM
 app.config['JWT_ISSUER'] = settings.JWT_ISSUER
 app.config['JWT_AUDIENCE'] = settings.JWT_AUDIENCE
 # Accept tokens from both .NET user login and Python API service
-app.config['JWT_ISSUER_WHITELIST'] = [settings.JWT_ISSUER, "https://localhost:7075"]
-app.config['JWT_AUDIENCE_WHITELIST'] = [settings.JWT_AUDIENCE, "https://localhost:7075"]
+app.config['JWT_ISSUER_WHITELIST'] = [x.strip() for x in settings.JWT_ISSUER_WHITELIST.split(',')]
+app.config['JWT_AUDIENCE_WHITELIST'] = [x.strip() for x in settings.JWT_AUDIENCE_WHITELIST.split(',')]
 app.config['JWT_CLOCK_SKEW_SECONDS'] = 60
 app.config['JWT_ENABLE_CLOUDFLARE_HEADERS'] = True
 
@@ -96,9 +96,17 @@ logger.info("="*60)
 # PUBLIC ENDPOINTS
 # ============================================================================
 
-@app.route('/health', methods=['GET'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
 def health_check():
-    """Health check endpoint with system statistics"""
+    """Health check endpoint with system statistics - No authentication required"""
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        return response, 200
+    
     try:
         # Get cache statistics from embedding cache
         cached_campers = list(face_service.embedding_cache.cache.keys())
@@ -121,15 +129,22 @@ def health_check():
         response_dict = response.model_dump()
         response_dict['loaded_camps'] = len(loaded_camps)
         
-        return jsonify(response_dict), 200
+        response_json = jsonify(response_dict)
+        # Add explicit CORS headers for health check
+        response_json.headers.add('Access-Control-Allow-Origin', '*')
+        response_json.headers.add('Access-Control-Allow-Headers', '*')
+        response_json.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        return response_json, 200
     
     except Exception as e:
         logger.error(f"Health check error: {e}")
-        return jsonify({
+        error_response = jsonify({
             "status": "error",
             "error": str(e),
             "timestamp": get_now().isoformat()
-        }), 500
+        })
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 
 @app.route('/apidoc', methods=['GET'])
@@ -819,22 +834,37 @@ def unauthorized(error):
     }), 401
 
 
-@app.route('/ready')
+@app.route('/ready', methods=['GET', 'OPTIONS'])
 def ready():
-    """Readiness probe for Kubernetes/Render"""
+    """Readiness probe for Kubernetes/Render - No authentication required"""
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        return response, 200
+    
     try:
         # Check if models and services are loaded
         if face_service and supabase_service:
-            return jsonify({
+            response_json = jsonify({
                 "status": "ready",
                 "model": settings.DEEPFACE_MODEL,
                 "cached_embeddings": face_service.embedding_cache.get_cache_stats()['total_cached'],
                 "timestamp": get_now().isoformat()
-            }), 200
-        return jsonify({"status": "not_ready"}), 503
+            })
+            response_json.headers.add('Access-Control-Allow-Origin', '*')
+            return response_json, 200
+        
+        not_ready_response = jsonify({"status": "not_ready"})
+        not_ready_response.headers.add('Access-Control-Allow-Origin', '*')
+        return not_ready_response, 503
     except Exception as e:
         logger.error(f"Readiness check failed: {e}")
-        return jsonify({"status": "error", "error": str(e)}), 503
+        error_response = jsonify({"status": "error", "error": str(e)})
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 503
 
 
 # ============================================================================

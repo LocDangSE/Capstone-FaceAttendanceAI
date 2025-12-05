@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = Field(default="HS256", description="JWT signing algorithm")
     JWT_ISSUER: str = Field(default="SummerCampBackend", description="JWT token issuer")
     JWT_AUDIENCE: str = Field(default="face-recognition-api", description="JWT token audience")
+    JWT_ISSUER_WHITELIST: str = Field(default="SummerCampBackend,https://localhost:7075,https://inheritable-narcisa-uncuriously.ngrok-free.dev,https://summercampapi-339197681269.asia-southeast1.run.app", description="Comma-separated list of allowed issuers")
+    JWT_AUDIENCE_WHITELIST: str = Field(default="face-recognition-api,https://localhost:7075,https://inheritable-narcisa-uncuriously.ngrok-free.dev,https://summercampapi-339197681269.asia-southeast1.run.app", description="Comma-separated list of allowed audiences")
     
     # ==================== DeepFace Settings ====================
     DEEPFACE_MODEL: str = Field(default="Facenet512", description="Face recognition model")
