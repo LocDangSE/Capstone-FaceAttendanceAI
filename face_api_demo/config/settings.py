@@ -21,7 +21,23 @@ class Settings(BaseSettings):
     # ==================== Flask Settings ====================
     FLASK_HOST: str = Field(default="0.0.0.0", description="Flask server host")
     FLASK_PORT: int = Field(default=5000, description="Flask server port")
-    FLASK_DEBUG: bool = Field(default=True, description="Flask debug mode")
+    FLASK_DEBUG: bool = Field(default=False, description="Flask debug mode")
+    
+    @field_validator('FLASK_PORT', mode='before')
+    @classmethod
+    def parse_flask_port(cls, v):
+        """Parse FLASK_PORT - handle Railway's $PORT variable"""
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            # Skip if it's a variable reference like "$PORT"
+            if v.startswith('$'):
+                return 5000  # Return default if variable not expanded
+            try:
+                return int(v)
+            except ValueError:
+                return 5000
+        return 5000
     
     # ==================== Supabase Settings ====================
     SUPABASE_URL: str = Field(default="", description="Supabase project URL")
