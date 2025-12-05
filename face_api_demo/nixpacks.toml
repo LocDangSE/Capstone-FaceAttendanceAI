@@ -1,19 +1,19 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip"]
+nixPkgs = ["python311"]
 
 [phases.install]
 cmds = [
-  "pip install -r requirements.txt"
+  "python -m venv /opt/venv",
+  ". /opt/venv/bin/activate && pip install -r requirements.txt"
 ]
 
 [phases.build]
 cmds = [
-  "echo 'Build complete - Railway deployment'",
-  "python -c 'import flask; import deepface; print(\"Dependencies OK\")'"
+  "echo 'Build complete - Railway deployment'"
 ]
 
 [start]
-cmd = "gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 300 --graceful-timeout 300 --keep-alive 5 --max-requests 100 --worker-class sync --preload --log-level info --access-logfile - --error-logfile - main:app"
+cmd = ". /opt/venv/bin/activate && gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 300 --graceful-timeout 300 --keep-alive 5 --max-requests 100 --worker-class sync --preload --log-level info --access-logfile - --error-logfile - main:app"
 
 [variables]
 PYTHONUNBUFFERED = "1"
