@@ -1,7 +1,11 @@
 [phases.setup]
 nixPkgs = [
   "python311",
-  "libGL",
+  "mesa",
+  "mesa_drivers",
+  "xorg.libXext",
+  "xorg.libXrender",
+  "xorg.libX11",
   "glib",
   "libxcrypt-legacy",
   "stdenv.cc.cc.lib",
@@ -28,4 +32,3 @@ cmd = "source /opt/venv/bin/activate && gunicorn -w 2 -b 0.0.0.0:$PORT --timeout
 [variables]
 PYTHONUNBUFFERED = "1"
 FLASK_ENV = "production"
-LD_LIBRARY_PATH = "/nix/store/*-gcc-*/lib"
