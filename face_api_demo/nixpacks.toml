@@ -1,7 +1,8 @@
 [phases.setup]
 nixPkgs = [
   "python311",
-  "mesa.drivers",
+  "libGL",
+  "mesa",
   "xorg.libXext",
   "xorg.libXrender",
   "xorg.libX11",
