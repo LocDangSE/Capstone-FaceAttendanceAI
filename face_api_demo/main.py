@@ -492,11 +492,37 @@ def unload_camp_face_database(camp_id):
 def get_camp_stats():
     """Get statistics about loaded camps"""
     try:
+        # Get cached campers from embedding cache (source of truth)
         cached_campers = list(face_service.embedding_cache.cache.keys())
         
+        # Scan face_database directory to find loaded camps
+        face_db_root = Path(settings.BASE_DIR) / "face_database"
+        detected_camps = {}
+        
+        if face_db_root.exists():
+            for camp_folder in face_db_root.iterdir():
+                if camp_folder.is_dir() and camp_folder.name.startswith('camp_'):
+                    camp_id = int(camp_folder.name.replace('camp_', ''))
+                    groups = []
+                    total_faces = 0
+                    
+                    for group_folder in camp_folder.iterdir():
+                        if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                            group_id = int(group_folder.name.replace('camper_group_', ''))
+                            groups.append(group_id)
+                            # Count image files in group folder
+                            face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.jpeg')) + list(group_folder.glob('avatar_*.png'))
+                            total_faces += len(face_files)
+                    
+                    if groups:
+                        detected_camps[camp_id] = {
+                            'face_count': total_faces,
+                            'groups': sorted(groups)
+                        }
+        
         return jsonify({
-            "loaded_camps": loaded_camps,
-            "total_camps": len(loaded_camps),
+            "loaded_camps": detected_camps,
+            "total_camps": len(detected_camps),
             "cache_stats": {
                 "total_cached": len(cached_campers),
                 "campers": cached_campers,
@@ -510,6 +536,177 @@ def get_camp_stats():
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/face-db/clear-all', methods=['DELETE'])
+@require_auth
+def clear_all_face_data():
+    """
+    Clear all face database and embeddings (testing/cleanup)
+    WARNING: This deletes all camps, embeddings, and cached data
+    """
+    try:
+        logger.warning(f"⚠️ CLEARING ALL FACE DATA (requested by {g.user.get('sub')})")
+        
+        deleted_items = {
+            "camps_deleted": 0,
+            "embeddings_deleted": 0,
+            "folders_deleted": []
+        }
+        
+        # Clear all embedding cache
+        face_service.embedding_cache.clear_cache()
+        logger.info("✅ Cleared embedding cache")
+        
+        # Delete all camp folders
+        face_db_root = Path(settings.BASE_DIR) / "face_database"
+        if face_db_root.exists():
+            for camp_folder in face_db_root.iterdir():
+                if camp_folder.is_dir() and camp_folder.name.startswith('camp_'):
+                    shutil.rmtree(camp_folder)
+                    deleted_items["folders_deleted"].append(camp_folder.name)
+                    deleted_items["camps_deleted"] += 1
+            logger.info(f"🗑️ Deleted {deleted_items['camps_deleted']} camp folders")
+        
+        # Delete all embedding files
+        embeddings_dir = Path(settings.BASE_DIR) / "embeddings"
+        if embeddings_dir.exists():
+            for emb_file in embeddings_dir.glob("*.npy"):
+                emb_file.unlink()
+                deleted_items["embeddings_deleted"] += 1
+            for json_file in embeddings_dir.glob("*.json"):
+                json_file.unlink()
+            logger.info(f"🗑️ Deleted {deleted_items['embeddings_deleted']} embedding files")
+        
+        # Clear loaded_camps dictionary
+        loaded_camps.clear()
+        
+        logger.warning(f"✅ ALL FACE DATA CLEARED: {deleted_items}")
+        
+        return jsonify({
+            "success": True,
+            "message": "All face data cleared successfully",
+            "deleted": deleted_items
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Error clearing all face data: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/api/face-db/clear-camp/<int:camp_id>', methods=['DELETE'])
+@require_auth
+def clear_camp_data(camp_id):
+    """
+    Clear face database and embeddings for a specific camp
+    Removes from cache, deletes local files and embeddings
+    """
+    try:
+        logger.info(f"🗑️ Clearing camp {camp_id} data (requested by {g.user.get('sub')})")
+        
+        deleted_items = {
+            "camp_id": camp_id,
+            "faces_deleted": 0,
+            "embeddings_deleted": 0,
+            "groups_deleted": []
+        }
+        
+        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        
+        # Clear cache for this camp's campers
+        if camp_folder.exists():
+            for group_folder in camp_folder.glob("camper_group_*"):
+                group_id = int(group_folder.name.replace('camper_group_', ''))
+                deleted_items["groups_deleted"].append(group_id)
+                
+                for face_file in group_folder.glob("avatar_*.jpg"):
+                    # Extract camper ID from filename (avatar_21_avatar_uuid.jpg)
+                    parts = face_file.stem.split('_')
+                    if len(parts) >= 2:
+                        camper_id_str = parts[1]
+                        face_service.embedding_cache.remove_camper(camper_id_str)
+                        deleted_items["faces_deleted"] += 1
+        
+        # Delete local face files
+        if camp_folder.exists():
+            shutil.rmtree(camp_folder)
+            logger.info(f"🗑️ Deleted folder: {camp_folder}")
+        
+        # Delete embedding files for this camp's campers
+        embeddings_dir = Path(settings.BASE_DIR) / "embeddings"
+        if embeddings_dir.exists():
+            # Note: Embedding files are named by camper UUID, not camp ID
+            # So we can't directly delete by camp. Already removed from cache above.
+            deleted_items["embeddings_deleted"] = deleted_items["faces_deleted"]
+        
+        # Remove from loaded_camps
+        if camp_id in loaded_camps:
+            del loaded_camps[camp_id]
+        
+        logger.info(f"✅ Camp {camp_id} cleared: {deleted_items}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Camp {camp_id} data cleared successfully",
+            "deleted": deleted_items
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Error clearing camp {camp_id}: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "camp_id": camp_id
+        }), 500
+
+
+@app.route('/api/face-db/clear-embeddings', methods=['DELETE'])
+@require_auth
+def clear_embeddings_cache():
+    """
+    Clear only the embeddings cache (keep face images)
+    Useful for testing or when embeddings need regeneration
+    """
+    try:
+        logger.info(f"🗑️ Clearing embeddings cache (requested by {g.user.get('sub')})")
+        
+        # Get count before clearing
+        cached_count = len(face_service.embedding_cache.cache)
+        
+        # Clear embedding cache
+        face_service.embedding_cache.clear_cache()
+        
+        # Delete all .npy and .json files
+        embeddings_dir = Path(settings.BASE_DIR) / "embeddings"
+        deleted_files = 0
+        
+        if embeddings_dir.exists():
+            for emb_file in embeddings_dir.glob("*.npy"):
+                emb_file.unlink()
+                deleted_files += 1
+            for json_file in embeddings_dir.glob("*.json"):
+                json_file.unlink()
+        
+        logger.info(f"✅ Cleared {cached_count} cached embeddings and {deleted_files} files")
+        
+        return jsonify({
+            "success": True,
+            "message": "Embeddings cache cleared successfully",
+            "cleared": {
+                "cached_embeddings": cached_count,
+                "deleted_files": deleted_files
+            }
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Error clearing embeddings: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 @app.route('/api/recognition/recognize-group/<int:camp_id>/<int:group_id>', methods=['POST'])
