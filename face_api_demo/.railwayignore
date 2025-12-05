@@ -1,0 +1,6 @@
+# Railway Configuration
+railway.json
+railway.toml
+
+# Railway build cache
+.nixpacks

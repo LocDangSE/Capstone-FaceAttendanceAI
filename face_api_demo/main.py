@@ -25,7 +25,13 @@ if settings.USE_OPTIMIZED_PROCESSOR:
 else:
     from services import ImageProcessor
 
-if settings.USE_OPTIMIZED_CACHE:
+# Use LazyEmbeddingCache for Railway (memory-efficient)
+use_lazy_cache = os.getenv('USE_LAZY_CACHE', 'true').lower() == 'true'
+if use_lazy_cache:
+    from services.lazy_embedding_cache import LazyEmbeddingCache as EmbeddingCache
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Using LazyEmbeddingCache (Railway-optimized)")
+elif settings.USE_OPTIMIZED_CACHE:
     from services.embedding_cache_optimized import OptimizedEmbeddingCache as EmbeddingCache
     logger = logging.getLogger(__name__)
     logger.info("✅ Using OptimizedEmbeddingCache with FAISS")

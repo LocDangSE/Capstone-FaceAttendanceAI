@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # Optimization flags
     USE_OPTIMIZED_CACHE: bool = Field(default=True, description="Use FAISS-accelerated embedding cache")
     USE_OPTIMIZED_PROCESSOR: bool = Field(default=True, description="Use optimized image processor")
+    USE_LAZY_CACHE: bool = Field(default=True, description="Use lazy-loading cache (Railway-optimized)")
+    
+    # Railway-specific settings
+    LAZY_CACHE_MAX_MEMORY: int = Field(default=50, description="Max embeddings in memory for lazy cache")
+    PRELOAD_BATCH_SIZE: int = Field(default=5, description="Batch size for preloading embeddings")
+    ASYNC_PRELOAD: bool = Field(default=True, description="Use async preloading to avoid blocking")
     
     # ==================== Directory Paths ====================
     BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent)
