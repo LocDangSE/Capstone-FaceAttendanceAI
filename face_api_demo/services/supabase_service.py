@@ -30,10 +30,15 @@ class SupabaseService:
         
         if self.enabled and self.url and self.key:
             try:
-                self.client = create_client(self.url, self.key)
+                # Create Supabase client with options to avoid proxy parameter issue
+                self.client = create_client(
+                    supabase_url=self.url,
+                    supabase_key=self.key
+                )
                 logger.info(f"✅ Supabase client initialized (bucket: {self.bucket})")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Supabase: {e}")
+                logger.exception("Full error details:")
                 self.enabled = False
         else:
             logger.info("ℹ️  Supabase storage disabled or not configured")
