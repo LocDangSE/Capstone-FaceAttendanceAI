@@ -68,6 +68,10 @@ attendance-sessions-receipts/
 *.tsbuildinfo
 vite.config.js.timestamp-*
 
+# Railway deployment
+.nixpacks/
+railway.toml
+
 # React/Node (if exists)
 node_modules/
 dist/
