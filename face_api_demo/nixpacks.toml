@@ -1,18 +1,14 @@
 [phases.setup]
 nixPkgs = [
   "python311",
-  "mesa",
-  "mesa_drivers",
+  "mesa.drivers",
   "xorg.libXext",
   "xorg.libXrender",
   "xorg.libX11",
   "glib",
   "libxcrypt-legacy",
   "stdenv.cc.cc.lib",
-  "zlib",
-  "openssl",
-  "ffmpeg",
-  "gcc"
+  "zlib"
 ]
 
 [phases.install]
