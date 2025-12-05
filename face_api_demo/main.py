@@ -443,39 +443,54 @@ def unload_camp_face_database(camp_id):
     """
     Unload face database for a specific camp
     Removes from cache and deletes local files
+    FIXED: Now checks filesystem instead of worker-specific loaded_camps
     """
     try:
         logger.info(f"🗑️ Unloading camp {camp_id} (requested by {g.user.get('sub')})")
         
-        if camp_id not in loaded_camps:
+        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        
+        # Check if camp exists on filesystem (not loaded_camps dict)
+        if not camp_folder.exists():
             return jsonify({
                 "success": False,
-                "message": f"Camp {camp_id} is not loaded",
+                "message": f"Camp {camp_id} does not exist",
                 "camp_id": camp_id
             }), 404
         
-        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        deleted_faces = 0
+        deleted_groups = []
         
         # Clear cache for this camp
-        if camp_folder.exists():
-            for group_folder in camp_folder.glob("camper_group_*"):
-                for face_file in group_folder.glob("avatar_*.jpg"):
-                    camper_id_str = face_file.stem.split('_')[1]
+        for group_folder in camp_folder.glob("camper_group_*"):
+            group_id = int(group_folder.name.replace('camper_group_', ''))
+            deleted_groups.append(group_id)
+            
+            for face_file in group_folder.glob("avatar_*.jpg"):
+                parts = face_file.stem.split('_')
+                if len(parts) >= 2:
+                    camper_id_str = parts[1]
                     face_service.embedding_cache.remove_camper(camper_id_str)
+                    deleted_faces += 1
         
         # Delete local files
-        if camp_folder.exists():
-            shutil.rmtree(camp_folder)
-            logger.info(f"🗑️ Deleted folder: {camp_folder}")
+        shutil.rmtree(camp_folder)
+        logger.info(f"🗑️ Deleted folder: {camp_folder}")
         
-        del loaded_camps[camp_id]
+        # Remove from loaded_camps if present in this worker
+        if camp_id in loaded_camps:
+            del loaded_camps[camp_id]
         
-        logger.info(f"✅ Camp {camp_id} unloaded successfully")
+        logger.info(f"✅ Camp {camp_id} unloaded: {deleted_faces} faces from groups {deleted_groups}")
         
         return jsonify({
             "success": True,
             "message": f"Camp {camp_id} unloaded successfully",
-            "camp_id": camp_id
+            "camp_id": camp_id,
+            "deleted": {
+                "faces": deleted_faces,
+                "groups": deleted_groups
+            }
         }), 200
     
     except Exception as e:
