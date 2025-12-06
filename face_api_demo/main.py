@@ -470,7 +470,7 @@ def unload_camp_face_database(camp_id):
                 parts = face_file.stem.split('_')
                 if len(parts) >= 2:
                     camper_id_str = parts[1]
-                    face_service.embedding_cache.remove_camper(camper_id_str)
+                    face_service.embedding_cache.clear_cache(camper_id_str)
                     deleted_faces += 1
         
         # Delete local files
@@ -642,7 +642,7 @@ def clear_camp_data(camp_id):
                     parts = face_file.stem.split('_')
                     if len(parts) >= 2:
                         camper_id_str = parts[1]
-                        face_service.embedding_cache.remove_camper(camper_id_str)
+                        face_service.embedding_cache.clear_cache(camper_id_str)
                         deleted_items["faces_deleted"] += 1
         
         # Delete local face files
