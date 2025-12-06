@@ -735,7 +735,9 @@ def recognize_faces_for_group(camp_id, group_id):
     try:
         logger.info(f"🎯 Group recognition: camp={camp_id}, group={group_id} (by {g.user.get('sub')})")
         
-        if camp_id not in loaded_camps:
+        # Check if camp exists on filesystem (not loaded_camps dict)
+        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        if not camp_folder.exists():
             return jsonify({
                 "success": False,
                 "message": f"Camp {camp_id} not loaded. Please load camp first.",
@@ -743,10 +745,12 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        if group_id not in loaded_camps[camp_id].get('groups', []):
+        # Check if group exists on filesystem
+        group_folder = camp_folder / f"camper_group_{group_id}"
+        if not group_folder.exists():
             return jsonify({
                 "success": False,
-                "message": f"Group {group_id} not found in camp {camp_id}",
+                "message": f"Group {group_id} not found in camp {camp_id}. Available groups: {[int(f.name.replace('camper_group_', '')) for f in camp_folder.glob('camper_group_*')]}",
                 "campId": camp_id,
                 "groupId": group_id
             }), 404
@@ -856,7 +860,9 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
     try:
         logger.info(f"🎯 Activity recognition: camp={camp_id}, activity={activity_schedule_id} (by {g.user.get('sub')})")
         
-        if camp_id not in loaded_camps:
+        # Check if camp exists on filesystem (not loaded_camps dict)
+        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        if not camp_folder.exists():
             return jsonify({
                 "success": False,
                 "message": f"Camp {camp_id} not loaded. Please load camp first.",
