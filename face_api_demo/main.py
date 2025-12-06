@@ -989,19 +989,23 @@ def detect_faces():
         
         faces = face_service.image_processor.extract_faces_from_frame(str(temp_file))
         
-        detected_faces = [
-            {
-                "index": idx,
-                "confidence": face.get('confidence', 0.0),
-                "region": {
-                    "x": face['facial_area']['x'],
-                    "y": face['facial_area']['y'],
-                    "width": face['facial_area']['w'],
-                    "height": face['facial_area']['h']
-                }
-            }
-            for idx, face in enumerate(faces)
-        ]
+        detected_faces = []
+        for idx, face in enumerate(faces):
+            # Handle facial_area key safely
+            facial_area = face.get('facial_area', {})
+            if facial_area:
+                detected_faces.append({
+                    "index": idx,
+                    "confidence": face.get('confidence', 0.0),
+                    "region": {
+                        "x": facial_area.get('x', 0),
+                        "y": facial_area.get('y', 0),
+                        "width": facial_area.get('w', facial_area.get('width', 0)),
+                        "height": facial_area.get('h', facial_area.get('height', 0))
+                    }
+                })
+            else:
+                logger.warning(f"Face {idx} missing facial_area data: {face.keys()}")
         
         return jsonify({
             "success": True,
