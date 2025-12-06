@@ -357,13 +357,16 @@ def load_camp_face_database(camp_id):
     Load face database for a specific camp from Supabase
     Downloads face images and generates embeddings for all camper groups
     """
+    request_id = str(uuid.uuid4())[:8]
     try:
-        logger.info(f"🔄 Loading face database for camp {camp_id} (requested by {g.user.get('sub')})")
+        logger.info(f"[{request_id}] 📥 START: Loading camp {camp_id} (requested by {g.user.get('sub')})")
         
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        logger.info(f"[{request_id}] Checking camp folder: {camp_folder}")
+        logger.info(f"[{request_id}] Folder exists: {camp_folder.exists()}")
         
         if camp_id in loaded_camps:
-            logger.info(f"✅ Camp {camp_id} already loaded with {loaded_camps[camp_id]['face_count']} faces")
+            logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded with {loaded_camps[camp_id]['face_count']} faces")
             return jsonify({
                 "success": True,
                 "message": f"Camp {camp_id} already loaded",
@@ -372,24 +375,48 @@ def load_camp_face_database(camp_id):
                 "groups": loaded_camps[camp_id]['groups']
             }), 200
         
+        # Check Supabase configuration
+        logger.info(f"[{request_id}] Checking Supabase configuration...")
+        logger.info(f"[{request_id}] SUPABASE_ENABLED: {settings.SUPABASE_ENABLED}")
+        
+        if not settings.SUPABASE_ENABLED:
+            logger.error(f"[{request_id}] ❌ Supabase is disabled in configuration")
+            return jsonify({
+                "success": False,
+                "message": "Supabase storage is not enabled"
+            }), 500
+        
         # Download avatar images from Supabase
-        logger.info(f"📥 Downloading face images from Supabase for camp {camp_id}...")
-        downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
+        logger.info(f"[{request_id}] 📥 Downloading face images from Supabase for camp {camp_id}...")
+        try:
+            downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
+            logger.info(f"[{request_id}] ✅ Downloaded {len(downloaded_files)} face images")
+        except Exception as supabase_error:
+            logger.error(f"[{request_id}] ❌ Supabase download error: {str(supabase_error)}")
+            logger.error(f"[{request_id}] {traceback.format_exc()}")
+            return jsonify({
+                "success": False,
+                "message": f"Supabase error: {str(supabase_error)}",
+                "camp_id": camp_id
+            }), 500
         
         if not downloaded_files:
+            logger.warning(f"[{request_id}] ⚠️ No face images found for camp {camp_id}")
             return jsonify({
                 "success": False,
                 "message": f"No face images found for camp {camp_id}",
                 "camp_id": camp_id
             }), 404
         
-        logger.info(f"✅ Downloaded {len(downloaded_files)} face images")
-        
         # Organize by groups and generate embeddings
+        logger.info(f"[{request_id}] Organizing files by groups...")
         groups_data = {}
         total_faces = 0
         
-        for file_path in downloaded_files:
+        for idx, file_path in enumerate(downloaded_files, 1):
+            if idx % 10 == 0:
+                logger.info(f"[{request_id}] Progress: {idx}/{len(downloaded_files)} files processed")
+            
             path = Path(file_path)
             parts = path.parts
             
@@ -405,10 +432,12 @@ def load_camp_face_database(camp_id):
                     groups_data[group_id] = []
                 groups_data[group_id].append(file_path)
         
+        logger.info(f"[{request_id}] Found {len(groups_data)} groups")
+        
         # Load embeddings for each group
         for group_id, face_files in groups_data.items():
             group_folder = camp_folder / f"camper_group_{group_id}"
-            logger.info(f"⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
+            logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
             face_service.embedding_cache._load_embeddings_from_folder(group_folder)
             total_faces += len(face_files)
         
@@ -418,7 +447,7 @@ def load_camp_face_database(camp_id):
             'groups': list(groups_data.keys())
         }
         
-        logger.info(f"✅ Camp {camp_id} loaded successfully: {total_faces} faces across {len(groups_data)} groups")
+        logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {len(groups_data)} groups")
         
         return jsonify({
             "success": True,
@@ -429,7 +458,8 @@ def load_camp_face_database(camp_id):
         }), 200
     
     except Exception as e:
-        logger.error(f"❌ Error loading camp {camp_id}: {e}", exc_info=True)
+        logger.error(f"[{request_id}] ❌ EXCEPTION in load_camp_face_database: {str(e)}")
+        logger.error(f"[{request_id}] {traceback.format_exc()}")
         return jsonify({
             "success": False,
             "error": str(e),
