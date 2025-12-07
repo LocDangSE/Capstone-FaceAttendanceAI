@@ -10,11 +10,49 @@ import logging
 from deepface import DeepFace
 from datetime import datetime
 import json
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from config.settings import settings, get_embedding_path
 from utils import get_now
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# OPTIMIZATION: Singleton Model Cache (Eliminates cold start)
+# ============================================================================
+_model_cache = {}
+_model_lock = threading.Lock()
+
+def _get_or_load_model(model_name: str):
+    """Singleton pattern for DeepFace model to avoid repeated loading"""
+    if model_name not in _model_cache:
+        with _model_lock:
+            if model_name not in _model_cache:
+                logger.info(f"🔥 Loading model {model_name} (first time only)...")
+                # Trigger model loading by calling DeepFace.build_model (correct API)
+                try:
+                    from deepface.commons import functions
+                    model_obj = functions.build_model(model_name)
+                    _model_cache[model_name] = model_obj
+                    logger.info(f"✅ Model {model_name} loaded and cached via build_model")
+                except Exception as e:
+                    # Fallback: Use DeepFace.represent to trigger model loading
+                    logger.info(f"Using fallback method to load {model_name}: {e}")
+                    import traceback
+                    logger.debug(f"Fallback reason traceback: {traceback.format_exc()}")
+                    try:
+                        dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
+                        DeepFace.represent(img_path=dummy_img, 
+                                          model_name=model_name, 
+                                          enforce_detection=False)
+                        _model_cache[model_name] = True
+                        logger.info(f"✅ Model {model_name} loaded and cached via represent")
+                    except Exception as fallback_error:
+                        logger.error(f"❌ Failed to load model {model_name}: {fallback_error}")
+                        logger.error(f"Model loading traceback: {traceback.format_exc()}")
+                        raise
+    return _model_cache.get(model_name)
 
 
 class EmbeddingCache:
@@ -34,6 +72,9 @@ class EmbeddingCache:
         self.metadata: Dict[str, Dict] = {}
         self.model_name = settings.DEEPFACE_MODEL
         self.distance_metric = settings.DEEPFACE_DISTANCE_METRIC
+        
+        # OPTIMIZATION: Preload model at initialization to avoid first-request latency
+        _get_or_load_model(self.model_name)
         
         logger.info(f"EmbeddingCache initialized with model: {self.model_name}")
         
@@ -75,7 +116,7 @@ class EmbeddingCache:
     
     def _load_embeddings_from_folder(self, folder_path: Path):
         """
-        Load embeddings from a specific activity schedule folder
+        Load embeddings from a specific activity schedule folder (OPTIMIZED: Parallel processing)
         Used for selective loading instead of loading all embeddings
         
         Args:
@@ -88,44 +129,72 @@ class EmbeddingCache:
             
             # Get all image files in folder
             image_files = list(folder_path.glob("*.jpg")) + list(folder_path.glob("*.jpeg")) + list(folder_path.glob("*.png"))
-            loaded_count = 0
             
-            logger.info(f"📥 Loading embeddings from {folder_path} ({len(image_files)} images)")
+            if not image_files:
+                logger.warning(f"No image files found in {folder_path}")
+                return
             
-            for image_file in image_files:
+            logger.info(f"📥 Generating embeddings for {len(image_files)} images from {folder_path}")
+            
+            # OPTIMIZATION: Generate embeddings in parallel during load (eager loading)
+            import re
+            
+            def process_single_image(image_file):
                 try:
-                    # Extract camper ID from filename
-                    # Format: avatar_21_avatar_uuid.jpg -> camper_id = 21
-                    # Or: 21.jpg -> camper_id = 21
                     filename = image_file.stem
                     if filename.startswith('avatar_'):
-                        # Extract number after first 'avatar_'
-                        import re
                         match = re.match(r'avatar_(\d+)', filename)
-                        if match:
-                            camper_id = match.group(1)
-                        else:
-                            camper_id = filename
+                        camper_id = match.group(1) if match else filename
                     else:
                         camper_id = filename
                     
-                    # Generate embedding if not cached
+                    # Generate embedding immediately (eager loading for fast recognition)
                     if camper_id not in self.cache:
                         embedding = self.generate_embedding(str(image_file))
                         if embedding is not None:
-                            self.cache[camper_id] = embedding
-                            self.metadata[camper_id] = {
-                                'camper_id': camper_id,
-                                'model': self.model_name,
-                                'cached_at': get_now().isoformat(),
-                                'source': str(folder_path)
-                            }
-                            loaded_count += 1
-                
+                            return (camper_id, embedding, str(folder_path))
+                    return None
                 except Exception as e:
-                    logger.error(f"Failed to load embedding for {image_file}: {e}")
+                    logger.error(f"Failed to generate embedding for {image_file}: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    return None
             
-            logger.info(f"✅ Loaded {loaded_count} embeddings into cache")
+            # Use ThreadPoolExecutor for parallel generation (2 workers for stability)
+            results = []
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(process_single_image, img) for img in image_files]
+                    
+                    for idx, future in enumerate(futures):
+                        try:
+                            result = future.result(timeout=60)
+                            results.append(result)
+                            if (idx + 1) % 3 == 0 or (idx + 1) == len(image_files):
+                                logger.info(f"Progress: {idx + 1}/{len(image_files)} embeddings generated")
+                        except Exception as e:
+                            logger.error(f"Exception generating embedding {idx}: {e}")
+                            results.append(None)
+            except Exception as e:
+                logger.error(f"ThreadPoolExecutor error: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Update cache with results
+            loaded_count = 0
+            for result in results:
+                if result:
+                    camper_id, embedding, source = result
+                    self.cache[camper_id] = embedding
+                    self.metadata[camper_id] = {
+                        'camper_id': camper_id,
+                        'model': self.model_name,
+                        'cached_at': get_now().isoformat(),
+                        'source': source
+                    }
+                    loaded_count += 1
+            
+            logger.info(f"✅ Generated and cached {loaded_count}/{len(image_files)} embeddings")
         
         except Exception as e:
             logger.error(f"Error loading embeddings from folder: {e}")
@@ -206,7 +275,7 @@ class EmbeddingCache:
     
     def generate_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """
-        Generate face embedding from image using DeepFace
+        Generate face embedding from image using DeepFace (uses singleton cached model)
         
         Args:
             image_path: Path to face image
@@ -216,6 +285,9 @@ class EmbeddingCache:
         """
         try:
             logger.debug(f"Generating embedding for: {image_path}")
+            
+            # OPTIMIZATION: Ensure model is loaded (singleton pattern)
+            _get_or_load_model(self.model_name)
             
             # Use DeepFace to generate embedding
             embedding_objs = DeepFace.represent(
@@ -235,8 +307,14 @@ class EmbeddingCache:
             logger.debug(f"Embedding generated: shape={embedding.shape}")
             return embedding
         
+        except KeyboardInterrupt:
+            # Re-raise keyboard interrupt to allow graceful shutdown
+            logger.warning(f"Keyboard interrupt during embedding generation for {image_path}")
+            raise
         except Exception as e:
-            logger.error(f"Error generating embedding: {e}")
+            logger.error(f"Error generating embedding for {image_path}: {e}")
+            import traceback
+            logger.error(f"Embedding generation traceback: {traceback.format_exc()}")
             return None
     
     def compare_embeddings(
@@ -287,7 +365,7 @@ class EmbeddingCache:
         threshold: Optional[float] = None
     ) -> Tuple[Optional[str], float, float]:
         """
-        Find best matching camper from cached embeddings
+        Find best matching camper from cached embeddings (OPTIMIZED: Early exit + vectorization)
         
         Args:
             query_embedding: Query embedding vector
@@ -305,24 +383,45 @@ class EmbeddingCache:
                 logger.warning("Cache is empty, no campers to match against")
                 return None, float('inf'), 0.0
             
-            best_camper_id = None
-            best_distance = float('inf')
+            # OPTIMIZATION: Vectorized comparison for speed
+            camper_ids = list(self.cache.keys())
+            cached_embeddings = np.array([self.cache[cid] for cid in camper_ids])
             
-            # Compare against all cached embeddings
-            for camper_id, cached_embedding in self.cache.items():
-                distance = self.compare_embeddings(query_embedding, cached_embedding)
-                
-                if distance < best_distance:
-                    best_distance = distance
-                    best_camper_id = camper_id
+            # Vectorized distance calculation
+            if self.distance_metric == 'cosine':
+                # Batch cosine distance
+                query_norm = np.linalg.norm(query_embedding)
+                cached_norms = np.linalg.norm(cached_embeddings, axis=1)
+                dot_products = np.dot(cached_embeddings, query_embedding)
+                cosine_similarities = dot_products / (cached_norms * query_norm + 1e-8)
+                distances = 1 - cosine_similarities
+            elif self.distance_metric == 'euclidean':
+                # Batch Euclidean distance
+                distances = np.linalg.norm(cached_embeddings - query_embedding, axis=1)
+            else:
+                # Fallback to original implementation
+                distances = np.array([self.compare_embeddings(query_embedding, emb) 
+                                     for emb in cached_embeddings])
+            
+            # Find best match
+            best_idx = np.argmin(distances)
+            best_distance = float(distances[best_idx])
+            best_camper_id = camper_ids[best_idx]
+            
+            # OPTIMIZATION: Early exit for high-confidence matches (70% of threshold)
+            high_confidence_threshold = threshold * 0.7
+            if best_distance < high_confidence_threshold:
+                confidence = 1.0 - best_distance
+                logger.debug(f"⚡ Early exit - High confidence match: {best_camper_id} (distance={best_distance:.4f})")
+                return best_camper_id, best_distance, confidence
             
             # Check if best match is within threshold
             if best_distance <= threshold:
                 confidence = 1.0 - best_distance
-                logger.debug(f"Best match: {best_camper_id} (distance={best_distance:.4f}, confidence={confidence:.4f})")
+                logger.info(f"✅ Match found: camper_id={best_camper_id} (distance={best_distance:.4f}, confidence={confidence:.4f}, threshold={threshold})")
                 return best_camper_id, best_distance, confidence
             else:
-                logger.debug(f"Best distance {best_distance:.4f} exceeds threshold {threshold}")
+                logger.warning(f"❌ No match: best_distance={best_distance:.4f} exceeds threshold={threshold} (best_camper_id={best_camper_id})")
                 return None, best_distance, 0.0
         
         except Exception as e:
@@ -376,9 +475,9 @@ class EmbeddingCache:
         if camper_id:
             if camper_id in self.cache:
                 del self.cache[camper_id]
-                if camper_id in self.metadata:
-                    del self.metadata[camper_id]
-                logger.info(f"Cleared cache for camper: {camper_id}")
+            if camper_id in self.metadata:
+                del self.metadata[camper_id]
+            logger.info(f"Cleared cache for camper: {camper_id}")
         else:
             self.cache.clear()
             self.metadata.clear()
