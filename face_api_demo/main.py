@@ -12,6 +12,8 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 import os
+import numpy as np
+import traceback
 
 from config import settings, setup_logging
 from services import SupabaseService
@@ -148,6 +150,53 @@ def health_check():
             "status": "error",
             "error": str(e),
             "timestamp": get_now().isoformat()
+        })
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
+
+
+@app.route('/warmup', methods=['POST', 'GET', 'OPTIONS'])
+def warmup():
+    """
+    Warmup endpoint to preload model and avoid cold start
+    Called by health checks or startup scripts to keep instance warm
+    """
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        return response, 200
+    
+    try:
+        import cv2
+        # Create dummy 224x224 RGB image
+        dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
+        temp_path = settings.TEMP_FOLDER / f"warmup_{uuid.uuid4()}.jpg"
+        cv2.imwrite(str(temp_path), dummy_img)
+        
+        # Trigger model loading and face detection
+        _ = face_service.embedding_cache.generate_embedding(str(temp_path))
+        
+        # Cleanup
+        if temp_path.exists():
+            temp_path.unlink()
+        
+        logger.info("✅ Warmup completed - model loaded and ready")
+        
+        response = jsonify({
+            "status": "warmed_up",
+            "model": settings.DEEPFACE_MODEL,
+            "message": "Model preloaded successfully"
+        })
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 200
+    except Exception as e:
+        logger.error(f"Warmup failed: {e}")
+        error_response = jsonify({
+            "status": "warmup_failed",
+            "error": str(e)
         })
         error_response.headers.add('Access-Control-Allow-Origin', '*')
         return error_response, 500
@@ -435,11 +484,28 @@ def load_camp_face_database(camp_id):
         logger.info(f"[{request_id}] Found {len(groups_data)} groups")
         
         # Load embeddings for each group
+        successfully_loaded = 0
         for group_id, face_files in groups_data.items():
-            group_folder = camp_folder / f"camper_group_{group_id}"
-            logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
-            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-            total_faces += len(face_files)
+            try:
+                group_folder = camp_folder / f"camper_group_{group_id}"
+                logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
+                face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+                total_faces += len(face_files)
+                successfully_loaded += 1
+                logger.info(f"[{request_id}] ✅ Group {group_id} embeddings loaded successfully")
+            except Exception as group_error:
+                logger.error(f"[{request_id}] ❌ Failed to load embeddings for group {group_id}: {group_error}")
+                import traceback
+                logger.error(f"[{request_id}] Group {group_id} traceback: {traceback.format_exc()}")
+                # Continue processing other groups even if one fails
+        
+        if successfully_loaded == 0:
+            logger.error(f"[{request_id}] ❌ Failed to load embeddings for all groups")
+            return jsonify({
+                "success": False,
+                "message": f"Failed to load embeddings for camp {camp_id}",
+                "camp_id": camp_id
+            }), 500
         
         loaded_camps[camp_id] = {
             'face_count': total_faces,
@@ -447,7 +513,7 @@ def load_camp_face_database(camp_id):
             'groups': list(groups_data.keys())
         }
         
-        logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {len(groups_data)} groups")
+        logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {successfully_loaded}/{len(groups_data)} groups")
         
         return jsonify({
             "success": True,
@@ -464,6 +530,53 @@ def load_camp_face_database(camp_id):
             "success": False,
             "error": str(e),
             "camp_id": camp_id
+        }), 500
+
+
+@app.route('/api/maintenance/cleanup-temp', methods=['POST'])
+@require_auth
+def cleanup_temp_folder():
+    """
+    Clean up temporary files in temp folder
+    Query params:
+    - older_than_hours: Only delete files older than X hours (optional, default: delete all)
+    """
+    try:
+        # Get optional age filter from query params
+        older_than_hours = request.args.get('older_than_hours', type=int)
+        
+        if older_than_hours:
+            logger.info(f"🧹 Cleaning up temp files older than {older_than_hours}h (requested by {g.user.get('sub')})")
+        else:
+            logger.info(f"🧹 Cleaning up all temp files (requested by {g.user.get('sub')})")
+        
+        deleted_count, failed_count, error = file_handler.cleanup_temp_folder(older_than_hours)
+        
+        if error:
+            return jsonify({
+                "success": False,
+                "message": f"Error cleaning temp folder: {error}"
+            }), 500
+        
+        message = f"Cleaned up temp folder: {deleted_count} items deleted"
+        if older_than_hours:
+            message += f" (older than {older_than_hours} hours)"
+        if failed_count > 0:
+            message += f", {failed_count} failed"
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "deleted_count": deleted_count,
+            "failed_count": failed_count,
+            "filter": f"{older_than_hours}h" if older_than_hours else "all"
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error in cleanup_temp_folder endpoint: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
         }), 500
 
 
@@ -535,13 +648,10 @@ def unload_camp_face_database(camp_id):
 @app.route('/api/face-db/stats', methods=['GET'])
 @require_auth
 def get_camp_stats():
-    """Get statistics about loaded camps"""
+    """Get statistics about loaded camps (FIXED: Filesystem-based, worker-independent)"""
     try:
-        # Get cached campers from embedding cache (source of truth)
-        cached_campers = list(face_service.embedding_cache.cache.keys())
-        
-        # Scan face_database directory to find loaded camps
-        face_db_root = Path(settings.BASE_DIR) / "face_database"
+        # Scan face_database directory to find loaded camps (source of truth for multi-worker setup)
+        face_db_root = settings.DATABASE_FOLDER
         detected_camps = {}
         
         if face_db_root.exists():
@@ -560,16 +670,18 @@ def get_camp_stats():
                             total_faces += len(face_files)
                     
                     if groups:
-                        detected_camps[camp_id] = {
-                            'face_count': total_faces,
-                            'groups': sorted(groups)
-                        }
+                        # Return face_count directly (not nested) for .NET compatibility
+                        detected_camps[camp_id] = total_faces
+        
+        # Cache stats for debugging
+        cached_count = len(face_service.embedding_cache.cache)
+        cached_campers = list(face_service.embedding_cache.cache.keys())
         
         return jsonify({
             "loaded_camps": detected_camps,
             "total_camps": len(detected_camps),
             "cache_stats": {
-                "total_cached": len(cached_campers),
+                "total_cached": cached_count,
                 "campers": cached_campers,
                 "model": settings.DEEPFACE_MODEL,
                 "distance_metric": settings.DEEPFACE_DISTANCE_METRIC,
@@ -812,7 +924,7 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 500
         
-        # Load embeddings for this specific group only
+        # Verify embeddings are registered for this group (lazy loading)
         group_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}" / f"camper_group_{group_id}"
         
         if not group_folder.exists():
@@ -823,10 +935,16 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        # Clear cache and load only this group's embeddings for accurate group-specific recognition
-        face_service.embedding_cache.clear_cache()
-        logger.info(f"⚡ Loading embeddings for group {group_id} only...")
-        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+        # Check if embeddings are cached (eager loaded during face-db load)
+        cached_count = len(face_service.embedding_cache.cache)
+        if cached_count == 0:
+            logger.warning(f"⚠️ No embeddings cached for group {group_id}. This should have been loaded via /api/face-db/load/{camp_id}")
+            logger.info(f"⚡ Loading embeddings for group {group_id} now...")
+            face_service.embedding_cache.clear_cache()
+            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+            logger.info(f"✅ Cached {len(face_service.embedding_cache.cache)} embeddings")
+        else:
+            logger.info(f"✅ Using {cached_count} cached embeddings for recognition")
         
         session_id = str(uuid.uuid4())
         

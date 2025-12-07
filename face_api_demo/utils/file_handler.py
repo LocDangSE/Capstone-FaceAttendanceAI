@@ -181,3 +181,57 @@ class FileHandler:
             directory: Directory path
         """
         directory.mkdir(parents=True, exist_ok=True)
+    
+    @staticmethod
+    def cleanup_temp_folder(older_than_hours: Optional[int] = None) -> Tuple[int, int, Optional[str]]:
+        """
+        Clean up files in temp folder
+        
+        Args:
+            older_than_hours: Only delete files older than this many hours (None = delete all)
+        
+        Returns:
+            Tuple of (deleted_count, failed_count, error_message)
+        """
+        try:
+            temp_folder = settings.TEMP_FOLDER
+            if not temp_folder.exists():
+                logger.warning(f"Temp folder does not exist: {temp_folder}")
+                return 0, 0, "Temp folder does not exist"
+            
+            deleted_count = 0
+            failed_count = 0
+            
+            # Calculate cutoff time if filtering by age
+            import time
+            cutoff_time = None
+            if older_than_hours is not None:
+                cutoff_time = time.time() - (older_than_hours * 3600)
+            
+            # Delete files in temp folder
+            for item in temp_folder.iterdir():
+                try:
+                    # Check age if filtering
+                    if cutoff_time is not None:
+                        item_mtime = item.stat().st_mtime
+                        if item_mtime > cutoff_time:
+                            continue  # Skip newer files
+                    
+                    if item.is_file():
+                        item.unlink()
+                        deleted_count += 1
+                        logger.debug(f"Deleted temp file: {item.name}")
+                    elif item.is_dir():
+                        shutil.rmtree(str(item))
+                        deleted_count += 1
+                        logger.debug(f"Deleted temp directory: {item.name}")
+                except Exception as e:
+                    failed_count += 1
+                    logger.warning(f"Failed to delete {item.name}: {e}")
+            
+            logger.info(f"Temp folder cleanup: {deleted_count} deleted, {failed_count} failed")
+            return deleted_count, failed_count, None
+        
+        except Exception as e:
+            logger.error(f"Error cleaning temp folder: {e}")
+            return 0, 0, str(e)

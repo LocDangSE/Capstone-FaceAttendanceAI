@@ -71,10 +71,10 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = Field(default=10, description="Batch size for bulk operations")
     CACHE_PRELOAD: bool = Field(default=True, description="Preload embeddings on startup")
     
-    # Optimization flags
+    # Optimization flags (defaults changed for production latency)
     USE_OPTIMIZED_CACHE: bool = Field(default=True, description="Use FAISS-accelerated embedding cache")
     USE_OPTIMIZED_PROCESSOR: bool = Field(default=True, description="Use optimized image processor")
-    USE_LAZY_CACHE: bool = Field(default=True, description="Use lazy-loading cache (Railway-optimized)")
+    USE_LAZY_CACHE: bool = Field(default=False, description="Use lazy-loading cache (Railway-optimized, slower than FAISS)")
     
     # Railway-specific settings
     LAZY_CACHE_MAX_MEMORY: int = Field(default=50, description="Max embeddings in memory for lazy cache")
