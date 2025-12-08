@@ -38,8 +38,10 @@ class LazyEmbeddingCache:
         """
         self.model = settings.DEEPFACE_MODEL
         self.distance_metric = settings.DEEPFACE_DISTANCE_METRIC
-        self.embedding_dir = Path("embeddings")
-        self.embedding_dir.mkdir(exist_ok=True)
+        # ✅ CRITICAL FIX: Use absolute path from settings (system-wide, worker-independent)
+        # This ensures embeddings persist across worker restarts on Railway
+        self.embedding_dir = settings.EMBEDDINGS_FOLDER
+        self.embedding_dir.mkdir(parents=True, exist_ok=True)
         
         # LRU cache in memory (OrderedDict for O(1) access and eviction)
         self.memory_cache: OrderedDict[str, np.ndarray] = OrderedDict()
@@ -187,6 +189,73 @@ class LazyEmbeddingCache:
             p.stem for p in self.embedding_dir.glob("*.npy")
         ]
     
+    def generate_embedding(self, image_path: str) -> Optional[np.ndarray]:
+        """
+        Generate face embedding from image using DeepFace
+        ✅ CRITICAL: Saves to disk automatically for persistence across worker restarts
+        
+        Args:
+            image_path: Path to face image
+            
+        Returns:
+            512D numpy array or None on failure
+        """
+        try:
+            from deepface import DeepFace
+            from config.settings import settings
+            
+            logger.debug(f"Generating embedding for: {image_path}")
+            
+            # Use DeepFace to generate embedding
+            embedding_objs = DeepFace.represent(
+                img_path=image_path,
+                model_name=self.model,
+                enforce_detection=False,
+                detector_backend=settings.DEEPFACE_DETECTOR
+            )
+            
+            if not embedding_objs or len(embedding_objs) == 0:
+                logger.error(f"No embedding generated for {image_path}")
+                return None
+            
+            # Extract embedding vector
+            embedding = np.array(embedding_objs[0]['embedding'])
+            
+            # ✅ CRITICAL: Extract camper_id from filename and save to disk
+            # This ensures embeddings persist across worker restarts
+            from pathlib import Path
+            filename = Path(image_path).stem
+            
+            # Try to extract camper_id from filename patterns
+            import re
+            camper_id = None
+            
+            # Pattern 1: avatar_21_avatar_uuid.jpg → camper_id = 21
+            match = re.match(r'avatar_(\d+)', filename)
+            if match:
+                camper_id = match.group(1)
+            # Pattern 2: face_uuid.jpg → use full filename as ID
+            else:
+                camper_id = filename
+            
+            if camper_id:
+                # Save to disk for persistence
+                self.set(camper_id, embedding, metadata={
+                    'generated_at': datetime.now().isoformat(),
+                    'source_image': str(image_path),
+                    'model': self.model
+                })
+                logger.info(f"✅ Generated and saved embedding for camper {camper_id}")
+            
+            logger.debug(f"Embedding generated: shape={embedding.shape}")
+            return embedding
+        
+        except Exception as e:
+            logger.error(f"Error generating embedding for {image_path}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+    
     def get_metadata(self, camper_id: str) -> Optional[dict]:
         """Get metadata for a camper"""
         if camper_id in self.metadata:
@@ -269,3 +338,145 @@ class LazyEmbeddingCache:
                     self.stats["evictions"] += 1
             
             logger.info(f"♻️  Optimized memory: removed {to_remove} embeddings")
+    
+    def find_best_match(self, query_embedding: np.ndarray, threshold: Optional[float] = None) -> Tuple[Optional[str], float, float]:
+        """
+        Find best matching camper from disk cache (lazy load on demand)
+        
+        Args:
+            query_embedding: Query embedding vector
+            threshold: Maximum distance threshold
+            
+        Returns:
+            Tuple of (camper_id, distance, confidence)
+        """
+        from config.settings import settings
+        
+        if threshold is None:
+            threshold = settings.CONFIDENCE_THRESHOLD
+        
+        # Get all cached embeddings from disk
+        cached_ids = [p.stem for p in self.embedding_dir.glob("*.npy")]
+        
+        if not cached_ids:
+            logger.warning("No cached embeddings found on disk")
+            return None, float('inf'), 0.0
+        
+        best_camper_id = None
+        best_distance = float('inf')
+        
+        # Compare against each cached embedding (lazy load from disk)
+        for camper_id in cached_ids:
+            embedding = self.get(camper_id)  # Lazy load from disk
+            if embedding is not None:
+                distance = self._compare_embeddings(query_embedding, embedding)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_camper_id = camper_id
+        
+        if best_distance <= threshold:
+            confidence = 1.0 - best_distance
+            logger.debug(f"Match found: {best_camper_id} (distance={best_distance:.4f}, confidence={confidence:.4f})")
+            return best_camper_id, best_distance, confidence
+        else:
+            logger.debug(f"No match found (best distance {best_distance:.4f} > threshold {threshold})")
+            return None, best_distance, 0.0
+    
+    def _compare_embeddings(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+        """Calculate cosine distance between two embeddings"""
+        dot_product = np.dot(embedding1, embedding2)
+        norm1 = np.linalg.norm(embedding1)
+        norm2 = np.linalg.norm(embedding2)
+        cosine_similarity = dot_product / (norm1 * norm2 + 1e-10)
+        return float(1.0 - cosine_similarity)
+    
+    def compare_embeddings(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+        """Public method for embedding comparison"""
+        return self._compare_embeddings(embedding1, embedding2)
+    
+    def clear_cache(self, camper_id: Optional[str] = None):
+        """
+        Clear cache (memory only by default, disk preserved for persistence)
+        
+        Args:
+            camper_id: Optional specific camper to clear, None = clear all memory
+        """
+        if camper_id:
+            if camper_id in self.memory_cache:
+                del self.memory_cache[camper_id]
+                logger.debug(f"Cleared memory cache for camper {camper_id}")
+        else:
+            count = len(self.memory_cache)
+            self.memory_cache.clear()
+            logger.info(f"🧹 Cleared {count} embeddings from memory cache")
+    
+    def _load_embeddings_from_folder(self, folder_path: Path):
+        """
+        EAGER LOADING: Generate and persist embeddings during pre-load stage
+        This ensures embeddings are ready for recognition requests (low latency)
+        
+        ✅ PRE-LOAD STAGE: Generate embeddings and save to disk (system-wide location)
+        ✅ RECOGNITION STAGE: Load embeddings from disk (no regeneration needed)
+        
+        Args:
+            folder_path: Path to folder containing face images
+        """
+        try:
+            if not folder_path.exists():
+                logger.warning(f"Folder not found: {folder_path}")
+                return
+            
+            image_files = list(folder_path.glob("*.jpg")) + list(folder_path.glob("*.jpeg")) + list(folder_path.glob("*.png"))
+            
+            if not image_files:
+                logger.warning(f"No image files found in {folder_path}")
+                return
+            
+            logger.info(f"⚡ EAGER LOADING: Processing {len(image_files)} images from {folder_path}")
+            
+            # Check which embeddings already exist on disk
+            existing_count = 0
+            need_generation = []
+            
+            for image_file in image_files:
+                filename = image_file.stem
+                # Extract camper_id from filename
+                import re
+                match = re.match(r'avatar_(\d+)', filename)
+                camper_id = match.group(1) if match else filename
+                
+                npy_path, _ = self._get_embedding_path(camper_id)
+                if npy_path.exists():
+                    existing_count += 1
+                    logger.debug(f"✅ Embedding exists: {camper_id}")
+                else:
+                    need_generation.append((image_file, camper_id))
+            
+            if existing_count == len(image_files):
+                logger.info(f"✅ All {existing_count} embeddings already exist on disk (pre-load complete)")
+                return
+            
+            # Generate embeddings for new faces
+            logger.info(f"📂 Found {existing_count} existing, generating {len(need_generation)} new embeddings...")
+            
+            for idx, (image_file, camper_id) in enumerate(need_generation, 1):
+                try:
+                    logger.debug(f"[{idx}/{len(need_generation)}] Generating embedding for camper {camper_id}...")
+                    # Generate and save to disk
+                    embedding = self.generate_embedding(str(image_file))
+                    if embedding is not None:
+                        logger.debug(f"✅ [{idx}/{len(need_generation)}] Saved embedding for camper {camper_id}")
+                    else:
+                        logger.warning(f"⚠️ [{idx}/{len(need_generation)}] Failed to generate embedding for {image_file}")
+                except Exception as e:
+                    logger.error(f"❌ Error generating embedding for {image_file}: {e}")
+            
+            logger.info(f"✅ PRE-LOAD COMPLETE: {existing_count + len(need_generation)} embeddings ready on disk")
+        
+        except Exception as e:
+            logger.error(f"Error loading embeddings from folder: {e}")
+    
+    @property
+    def cache(self) -> dict:
+        """Property for compatibility with old code that accesses .cache directly"""
+        return self.memory_cache
