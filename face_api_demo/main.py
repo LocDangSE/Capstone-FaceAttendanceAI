@@ -1203,6 +1203,290 @@ def clear_cache():
 
 
 # ============================================================================
+# Mobile Direct Recognition API (NEW FLOW)
+# ============================================================================
+
+@app.route('/api/recognition/mobile/recognize', methods=['POST'])
+@require_auth
+def mobile_recognize_faces():
+    """
+    🎯 Mobile-optimized endpoint: Direct recognition with async .NET webhook
+    
+    Flow:
+    1. Mobile → Python (this endpoint)
+    2. Python recognizes faces (2-4s)
+    3. Python returns to mobile IMMEDIATELY ✅
+    4. Python → .NET webhook (background, async)
+    5. .NET updates attendance + broadcasts SignalR
+    
+    Requirements:
+    - activityScheduleId: int (required)
+    - groupId: int (required)
+    - campId: int (required)
+    - image: file (required)
+    
+    Headers:
+    - Authorization: Bearer {userJwt}
+    - X-Request-ID: {uuid} (optional, auto-generated if missing)
+    """
+    from services.webhook_service import start_webhook_thread
+    
+    request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())[:8]
+    start_time = datetime.now()
+    image_path = None
+    
+    try:
+        logger.info(f"[{request_id}] 📱 Mobile recognition request started")
+        
+        # ========== PHASE 1: VALIDATION (Target: <50ms) ==========
+        validation_start = datetime.now()
+        
+        # Get parameters
+        activity_schedule_id = request.form.get('activityScheduleId')
+        group_id = request.form.get('groupId')
+        camp_id = request.form.get('campId')
+        
+        if not all([activity_schedule_id, group_id, camp_id]):
+            return jsonify({
+                "success": False,
+                "error": "Missing required parameters: activityScheduleId, groupId, campId"
+            }), 400
+        
+        if 'image' not in request.files:
+            return jsonify({"success": False, "error": "No image provided"}), 400
+        
+        image_file = request.files['image']
+        if image_file.filename == '':
+            return jsonify({"success": False, "error": "Empty filename"}), 400
+        
+        # Extract user info from JWT (set by @require_auth middleware)
+        user_id = getattr(g, 'user_id', g.user.get('sub', 'unknown'))
+        username = getattr(g, 'username', g.user.get('name', g.user.get('email', 'unknown')))
+        
+        validation_time = (datetime.now() - validation_start).total_seconds()
+        logger.info(f"[{request_id}] ✅ Validation completed in {validation_time*1000:.0f}ms")
+        
+        # ========== PHASE 2: AUTHORIZATION CHECK (Target: <10ms) ==========
+        auth_start = datetime.now()
+        
+        # Quick filesystem check (NO database query - optimized for speed)
+        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
+        group_folder = camp_folder / f"camper_group_{group_id}"
+        
+        if not camp_folder.exists():
+            return jsonify({
+                "success": False,
+                "error": f"Camp {camp_id} not loaded. Please pre-load the camp first.",
+                "requiresPreload": True,
+                "campId": int(camp_id)
+            }), 404
+        
+        if not group_folder.exists():
+            available_groups = [
+                int(g.name.replace('camper_group_', ''))
+                for g in camp_folder.iterdir()
+                if g.is_dir() and g.name.startswith('camper_group_')
+            ]
+            return jsonify({
+                "success": False,
+                "error": f"Group {group_id} not found in camp {camp_id}",
+                "availableGroups": available_groups,
+                "campId": int(camp_id),
+                "groupId": int(group_id)
+            }), 404
+        
+        auth_time = (datetime.now() - auth_start).total_seconds()
+        logger.info(f"[{request_id}] ✅ Authorization check completed in {auth_time*1000:.0f}ms")
+        
+        # ========== PHASE 3: SAVE IMAGE (Target: <100ms) ==========
+        save_start = datetime.now()
+        
+        # Save to temp folder
+        image_path, error = file_handler.save_uploaded_file(image_file, f"mobile_{request_id}")
+        if error:
+            return jsonify({
+                "success": False,
+                "error": f"Failed to save image: {error}"
+            }), 500
+        
+        save_time = (datetime.now() - save_start).total_seconds()
+        logger.info(f"[{request_id}] ✅ Image saved in {save_time*1000:.0f}ms")
+        
+        # ========== PHASE 4: FACE RECOGNITION (Target: 2-3s) ==========
+        recognition_start = datetime.now()
+        
+        logger.info(
+            f"[{request_id}] 🎯 Starting face recognition "
+            f"(camp={camp_id}, group={group_id}, activity={activity_schedule_id})"
+        )
+        
+        # Use existing recognition service (already optimized)
+        results = face_service.check_attendance(
+            image_path=image_path,
+            camp_id=int(camp_id),
+            group_id=int(group_id),
+            save_results=False  # Skip disk I/O for speed
+        )
+        
+        recognition_time = (datetime.now() - recognition_start).total_seconds()
+        logger.info(f"[{request_id}] ✅ Recognition completed in {recognition_time:.2f}s")
+        
+        # ========== PHASE 5: PREPARE RESPONSE (Target: <50ms) ==========
+        response_start = datetime.now()
+        
+        total_time = (datetime.now() - start_time).total_seconds()
+        
+        # Prepare recognized campers list
+        recognized_campers = []
+        for r in results:
+            camper_id = r.get('camper_id', -1)
+            if camper_id > 0:  # Only include recognized faces
+                recognized_campers.append({
+                    "camperId": camper_id,
+                    "confidence": round(r.get('confidence', 0.0), 3),
+                    "distance": round(r.get('distance', 0.0), 3),
+                    "boundingBox": r.get('bounding_box'),
+                    "faceArea": r.get('face_area', 0)
+                })
+        
+        response_data = {
+            "success": True,
+            "requestId": request_id,
+            "recognizedCampers": recognized_campers,
+            "summary": {
+                "totalDetected": len(results),
+                "totalRecognized": len(recognized_campers),
+                "totalUnknown": len(results) - len(recognized_campers)
+            },
+            "performance": {
+                "totalTime": round(total_time, 3),
+                "validationTime": round(validation_time, 3),
+                "authorizationTime": round(auth_time, 3),
+                "imageLoadTime": round(save_time, 3),
+                "recognitionTime": round(recognition_time, 3),
+                "meetsRequirement": total_time < 4.0  # Capstone requirement: <4s
+            },
+            "metadata": {
+                "activityScheduleId": int(activity_schedule_id),
+                "groupId": int(group_id),
+                "campId": int(camp_id),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "processedBy": username
+            }
+        }
+        
+        response_time = (datetime.now() - response_start).total_seconds()
+        logger.info(f"[{request_id}] ✅ Response prepared in {response_time*1000:.0f}ms")
+        
+        # ========== PHASE 6: RETURN TO MOBILE IMMEDIATELY ==========
+        logger.info(
+            f"[{request_id}] 📱 Returning to mobile "
+            f"(total: {total_time:.2f}s, meets requirement: {total_time < 4.0})"
+        )
+        
+        # ========== PHASE 7: ASYNC DATABASE UPDATE (Background) ==========
+        # Start background thread to update .NET database
+        start_webhook_thread(
+            request_id=request_id,
+            activity_schedule_id=int(activity_schedule_id),
+            group_id=int(group_id),
+            camp_id=int(camp_id),
+            results=results,
+            user_id=user_id,
+            username=username
+        )
+        
+        logger.info(f"[{request_id}] 🔄 Database update queued (async)")
+        
+        # Cleanup temp file (async to save time)
+        if image_path and Path(image_path).exists():
+            import threading
+            threading.Thread(
+                target=lambda: Path(image_path).unlink(),
+                daemon=True
+            ).start()
+        
+        return jsonify(response_data), 200
+    
+    except Exception as e:
+        total_time = (datetime.now() - start_time).total_seconds()
+        logger.error(f"[{request_id}] ❌ Error after {total_time:.2f}s: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Cleanup temp file on error
+        if image_path and Path(image_path).exists():
+            try:
+                Path(image_path).unlink()
+            except:
+                pass
+        
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "requestId": request_id,
+            "totalTime": round(total_time, 3)
+        }), 500
+
+
+@app.route('/api/health/webhook', methods=['GET'])
+@require_auth
+def webhook_health_check():
+    """
+    Test .NET backend connectivity and service JWT generation
+    Returns webhook health status for debugging
+    """
+    try:
+        from services.jwt_service import generate_service_jwt
+        import requests
+        
+        # Test JWT generation
+        try:
+            service_token = generate_service_jwt()
+            jwt_valid = len(service_token) > 0
+        except Exception as e:
+            jwt_valid = False
+            jwt_error = str(e)
+        
+        # Test .NET connectivity
+        dotnet_reachable = False
+        dotnet_response_time = None
+        dotnet_error = None
+        
+        try:
+            start = datetime.now()
+            response = requests.get(
+                f"{settings.DOTNET_API_URL}/health",
+                timeout=5
+            )
+            dotnet_response_time = (datetime.now() - start).total_seconds()
+            dotnet_reachable = response.status_code == 200
+        except Exception as e:
+            dotnet_error = str(e)
+        
+        return jsonify({
+            "success": True,
+            "webhook": {
+                "jwtValid": jwt_valid,
+                "jwtError": jwt_error if not jwt_valid else None,
+                "dotnetReachable": dotnet_reachable,
+                "dotnetUrl": settings.DOTNET_API_URL,
+                "dotnetResponseTime": round(dotnet_response_time, 3) if dotnet_response_time else None,
+                "dotnetError": dotnet_error,
+                "webhookTimeout": settings.DOTNET_WEBHOOK_TIMEOUT,
+                "webhookRetryCount": settings.DOTNET_WEBHOOK_RETRY_COUNT
+            },
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Webhook health check error: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# ============================================================================
 # Error Handlers
 # ============================================================================
 

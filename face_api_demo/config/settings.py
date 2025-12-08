@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     PRELOAD_BATCH_SIZE: int = Field(default=5, description="Batch size for preloading embeddings")
     ASYNC_PRELOAD: bool = Field(default=True, description="Use async preloading to avoid blocking")
     
+    # ==================== .NET Backend Integration ====================
+    DOTNET_API_URL: str = Field(default="https://summercampapi-339197681269.asia-southeast1.run.app", description=".NET backend base URL")
+    DOTNET_WEBHOOK_TIMEOUT: float = Field(default=5.0, description="Webhook request timeout in seconds")
+    DOTNET_WEBHOOK_RETRY_COUNT: int = Field(default=3, description="Number of webhook retry attempts")
+    SERVICE_JWT_SECRET: str = Field(default="", description="Service-to-service JWT secret (shared with .NET)")
+    SERVICE_JWT_ISSUER: str = Field(default="PythonAiService", description="Service JWT issuer name")
+    SERVICE_JWT_AUDIENCE: str = Field(default="SummerCampBackend", description="Service JWT audience")
+    
     # ==================== Directory Paths ====================
     BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent)
     UPLOAD_FOLDER: Optional[Path] = Field(default=None)
