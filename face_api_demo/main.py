@@ -414,15 +414,37 @@ def load_camp_face_database(camp_id):
         logger.info(f"[{request_id}] Checking camp folder: {camp_folder}")
         logger.info(f"[{request_id}] Folder exists: {camp_folder.exists()}")
         
-        if camp_id in loaded_camps:
-            logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded with {loaded_camps[camp_id]['face_count']} faces")
-            return jsonify({
-                "success": True,
-                "message": f"Camp {camp_id} already loaded",
-                "camp_id": camp_id,
-                "face_count": loaded_camps[camp_id]['face_count'],
-                "groups": loaded_camps[camp_id]['groups']
-            }), 200
+        # ✅ FIXED: Check filesystem instead of worker-specific loaded_camps
+        if camp_folder.exists():
+            # Count existing faces in filesystem
+            total_faces = 0
+            groups = []
+            for group_folder in camp_folder.iterdir():
+                if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                    group_id = int(group_folder.name.replace('camper_group_', ''))
+                    groups.append(group_id)
+                    face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
+                    total_faces += len(face_files)
+            
+            if total_faces > 0:
+                logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded on filesystem ({total_faces} faces)")
+                
+                # Load embeddings into cache if not already cached
+                cached_count = len(face_service.embedding_cache.cache)
+                if cached_count == 0:
+                    logger.info(f"[{request_id}] Loading embeddings from filesystem into cache...")
+                    for group_id in groups:
+                        group_folder = camp_folder / f"camper_group_{group_id}"
+                        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+                    logger.info(f"[{request_id}] ✅ Loaded {len(face_service.embedding_cache.cache)} embeddings into cache")
+                
+                return jsonify({
+                    "success": True,
+                    "message": f"Camp {camp_id} already loaded (filesystem check)",
+                    "camp_id": camp_id,
+                    "face_count": total_faces,
+                    "groups": groups
+                }), 200
         
         # Check Supabase configuration
         logger.info(f"[{request_id}] Checking Supabase configuration...")
@@ -507,12 +529,7 @@ def load_camp_face_database(camp_id):
                 "camp_id": camp_id
             }), 500
         
-        loaded_camps[camp_id] = {
-            'face_count': total_faces,
-            'load_time': get_now().isoformat(),
-            'groups': list(groups_data.keys())
-        }
-        
+        # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
         logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {successfully_loaded}/{len(groups_data)} groups")
         
         return jsonify({
@@ -620,10 +637,7 @@ def unload_camp_face_database(camp_id):
         shutil.rmtree(camp_folder)
         logger.info(f"🗑️ Deleted folder: {camp_folder}")
         
-        # Remove from loaded_camps if present in this worker
-        if camp_id in loaded_camps:
-            del loaded_camps[camp_id]
-        
+        # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
         logger.info(f"✅ Camp {camp_id} unloaded: {deleted_faces} faces from groups {deleted_groups}")
         
         return jsonify({
@@ -735,9 +749,7 @@ def clear_all_face_data():
                 json_file.unlink()
             logger.info(f"🗑️ Deleted {deleted_items['embeddings_deleted']} embedding files")
         
-        # Clear loaded_camps dictionary
-        loaded_camps.clear()
-        
+        # ✅ FIXED: No need to clear loaded_camps - filesystem is source of truth
         logger.warning(f"✅ ALL FACE DATA CLEARED: {deleted_items}")
         
         return jsonify({
@@ -799,10 +811,7 @@ def clear_camp_data(camp_id):
             # So we can't directly delete by camp. Already removed from cache above.
             deleted_items["embeddings_deleted"] = deleted_items["faces_deleted"]
         
-        # Remove from loaded_camps
-        if camp_id in loaded_camps:
-            del loaded_camps[camp_id]
-        
+        # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
         logger.info(f"✅ Camp {camp_id} cleared: {deleted_items}")
         
         return jsonify({
