@@ -312,46 +312,159 @@ def openapi_spec():
             },
             "/api/recognition/recognize-group/{camp_id}/{group_id}": {
                 "post": {
-                    "summary": "Recognize faces for group activity",
+                    "summary": "Recognize faces for group activity (with webhook support)",
+                    "description": "Recognizes faces and optionally triggers .NET webhook for real-time SignalR updates. Include activityScheduleId to enable webhook.",
                     "tags": ["Recognition"],
                     "security": [{"bearerAuth": []}],
                     "parameters": [
                         {"name": "camp_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-                        {"name": "group_id", "in": "path", "required": True, "schema": {"type": "integer"}}
+                        {"name": "group_id", "in": "path", "required": True, "schema": {"type": "integer"}},
+                        {"name": "X-Request-ID", "in": "header", "required": False, "schema": {"type": "string"}, "description": "Optional request ID for idempotency"}
                     ],
                     "requestBody": {
                         "content": {
                             "multipart/form-data": {
                                 "schema": {
                                     "type": "object",
-                                    "properties": {"photo": {"type": "string", "format": "binary"}}
+                                    "properties": {
+                                        "photo": {"type": "string", "format": "binary", "description": "Image file to recognize"},
+                                        "activityScheduleId": {"type": "integer", "description": "Activity schedule ID (required for webhook/SignalR)"}
+                                    },
+                                    "required": ["photo"]
                                 }
                             }
                         }
                     },
-                    "responses": {"200": {"description": "Faces recognized successfully"}}
+                    "responses": {
+                        "200": {
+                            "description": "Faces recognized successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "success": {"type": "boolean"},
+                                            "requestId": {"type": "string"},
+                                            "recognizedCampers": {"type": "array"},
+                                            "webhookQueued": {"type": "boolean", "description": "True if webhook was triggered"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "/api/recognition/recognize-activity/{camp_id}/{activity_schedule_id}": {
                 "post": {
-                    "summary": "Recognize faces for optional activity",
+                    "summary": "Recognize faces for optional activity (with webhook support)",
+                    "description": "Recognizes faces for optional activities. Automatically triggers .NET webhook for real-time SignalR updates using activity_schedule_id.",
                     "tags": ["Recognition"],
                     "security": [{"bearerAuth": []}],
                     "parameters": [
                         {"name": "camp_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-                        {"name": "activity_schedule_id", "in": "path", "required": True, "schema": {"type": "integer"}}
+                        {"name": "activity_schedule_id", "in": "path", "required": True, "schema": {"type": "integer"}},
+                        {"name": "X-Request-ID", "in": "header", "required": False, "schema": {"type": "string"}, "description": "Optional request ID for idempotency"}
                     ],
                     "requestBody": {
                         "content": {
                             "multipart/form-data": {
                                 "schema": {
                                     "type": "object",
-                                    "properties": {"photo": {"type": "string", "format": "binary"}}
+                                    "properties": {
+                                        "photo": {"type": "string", "format": "binary", "description": "Image file to recognize"}
+                                    },
+                                    "required": ["photo"]
                                 }
                             }
                         }
                     },
-                    "responses": {"200": {"description": "Faces recognized successfully"}}
+                    "responses": {
+                        "200": {
+                            "description": "Faces recognized successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "success": {"type": "boolean"},
+                                            "requestId": {"type": "string"},
+                                            "recognizedCampers": {"type": "array"},
+                                            "webhookQueued": {"type": "boolean", "description": "True if webhook was triggered"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/api/recognition/mobile/recognize": {
+                "post": {
+                    "summary": "Mobile-optimized face recognition (with auto webhook)",
+                    "description": "Mobile-optimized endpoint for real-time face recognition. All parameters in form-data. Automatically triggers .NET webhook for database updates and SignalR broadcasts. Returns detailed performance metrics.",
+                    "tags": ["Recognition"],
+                    "security": [{"bearerAuth": []}],
+                    "parameters": [
+                        {"name": "X-Request-ID", "in": "header", "required": False, "schema": {"type": "string"}, "description": "Optional request ID for idempotency"}
+                    ],
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "image": {"type": "string", "format": "binary", "description": "Image file to recognize"},
+                                        "activityScheduleId": {"type": "integer", "description": "Activity schedule ID (required)"},
+                                        "groupId": {"type": "integer", "description": "Camper group ID (required)"},
+                                        "campId": {"type": "integer", "description": "Camp ID (required)"}
+                                    },
+                                    "required": ["image", "activityScheduleId", "groupId", "campId"]
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Recognition successful with performance metrics",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "success": {"type": "boolean"},
+                                            "requestId": {"type": "string"},
+                                            "recognizedCampers": {"type": "array"},
+                                            "summary": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "totalDetected": {"type": "integer"},
+                                                    "totalRecognized": {"type": "integer"},
+                                                    "totalUnknown": {"type": "integer"}
+                                                }
+                                            },
+                                            "performance": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "totalTime": {"type": "number"},
+                                                    "recognitionTime": {"type": "number"},
+                                                    "meetsRequirement": {"type": "boolean", "description": "True if <4 seconds"}
+                                                }
+                                            },
+                                            "metadata": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "activityScheduleId": {"type": "integer"},
+                                                    "groupId": {"type": "integer"},
+                                                    "campId": {"type": "integer"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "/api/face/detect": {
@@ -881,10 +994,15 @@ def recognize_faces_for_group(camp_id, group_id):
     """
     Recognize faces for a specific camper group (core activities)
     Optimized: loads only faces from that group's folder
+    NOW WITH WEBHOOK SUPPORT: Updates .NET backend + SignalR broadcast
     """
+    from services.webhook_service import start_webhook_thread
+    
     temp_file = None
+    request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())[:8]
+    
     try:
-        logger.info(f"🎯 Group recognition: camp={camp_id}, group={group_id} (by {g.user.get('sub')})")
+        logger.info(f"[{request_id}] 🎯 Group recognition: camp={camp_id}, group={group_id} (by {g.user.get('sub')})")
         
         # Check if camp exists on filesystem (not loaded_camps dict)
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
@@ -978,11 +1096,16 @@ def recognize_faces_for_group(camp_id, group_id):
             for r in result.get('recognized_campers', [])
         ]
         
-        logger.info(f"✅ Recognized {len(recognized_campers)} camper(s) from group {group_id}")
+        logger.info(f"[{request_id}] ✅ Recognized {len(recognized_campers)} camper(s) from group {group_id}")
         
-        return jsonify({
+        # Get activityScheduleId from request (required for webhook)
+        activity_schedule_id = request.form.get('activityScheduleId') or request.args.get('activityScheduleId')
+        
+        # Prepare response
+        response_data = {
             "success": True,
             "message": f"Recognized {len(recognized_campers)} camper(s) from group {group_id}",
+            "requestId": request_id,
             "campId": camp_id,
             "groupId": group_id,
             "sessionId": session_id,
@@ -991,7 +1114,34 @@ def recognize_faces_for_group(camp_id, group_id):
             "matchedFaces": len(recognized_campers),
             "processingTimeMs": int(result.get('processing_time', 0) * 1000),
             "timestamp": get_now().isoformat()
-        }), 200
+        }
+        
+        # ========== TRIGGER WEBHOOK TO .NET (if activityScheduleId provided) ==========
+        if activity_schedule_id:
+            logger.info(f"[{request_id}] 🔄 Starting webhook to .NET for activity {activity_schedule_id}")
+            
+            # Extract user info from JWT token
+            user_id = g.user.get('id') or g.user.get('sub') or g.user.get('userId') or 'system'
+            username = g.user.get('name') or g.user.get('email') or g.user.get('username') or 'system'
+            
+            # Start background webhook thread
+            start_webhook_thread(
+                request_id=request_id,
+                activity_schedule_id=int(activity_schedule_id),
+                group_id=group_id,
+                camp_id=camp_id,
+                results=result.get('recognized_campers', []),
+                user_id=user_id,
+                username=username
+            )
+            
+            response_data["webhookQueued"] = True
+            response_data["activityScheduleId"] = int(activity_schedule_id)
+        else:
+            logger.warning(f"[{request_id}] ⚠️ No activityScheduleId provided, skipping webhook")
+            response_data["webhookQueued"] = False
+        
+        return jsonify(response_data), 200
     
     except Exception as e:
         logger.error(f"❌ Error in group recognition: {e}", exc_info=True)
@@ -1012,10 +1162,15 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
     """
     Recognize faces for optional activity
     Optimized: loads only faces from that activity's folder
+    NOW WITH WEBHOOK SUPPORT: Updates .NET backend + SignalR broadcast
     """
+    from services.webhook_service import start_webhook_thread
+    
     temp_file = None
+    request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())[:8]
+    
     try:
-        logger.info(f"🎯 Activity recognition: camp={camp_id}, activity={activity_schedule_id} (by {g.user.get('sub')})")
+        logger.info(f"[{request_id}] 🎯 Activity recognition: camp={camp_id}, activity={activity_schedule_id} (by {g.user.get('sub')})")
         
         # Check if camp exists on filesystem (not loaded_camps dict)
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
@@ -1091,11 +1246,13 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
             for r in result.get('recognized_campers', [])
         ]
         
-        logger.info(f"✅ Recognized {len(recognized_campers)} camper(s) for activity {activity_schedule_id}")
+        logger.info(f"[{request_id}] ✅ Recognized {len(recognized_campers)} camper(s) for activity {activity_schedule_id}")
         
-        return jsonify({
+        # Prepare response
+        response_data = {
             "success": True,
             "message": f"Recognized {len(recognized_campers)} camper(s)",
+            "requestId": request_id,
             "campId": camp_id,
             "activityScheduleId": activity_schedule_id,
             "sessionId": session_id,
@@ -1104,7 +1261,29 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
             "matchedFaces": len(recognized_campers),
             "processingTimeMs": int(result.get('processing_time', 0) * 1000),
             "timestamp": get_now().isoformat()
-        }), 200
+        }
+        
+        # ========== TRIGGER WEBHOOK TO .NET (always for activity endpoint) ==========
+        logger.info(f"[{request_id}] 🔄 Starting webhook to .NET for activity {activity_schedule_id}")
+        
+        # Extract user info
+        user_id = g.user.get('id') or g.user.get('sub') or g.user.get('userId') or 'system'
+        username = getattr(g, 'username', g.user.get('name', g.user.get('email', 'unknown')))
+        
+        # Start background webhook thread
+        start_webhook_thread(
+            request_id=request_id,
+            activity_schedule_id=activity_schedule_id,
+            group_id=None,  # Optional activities may not have group_id
+            camp_id=camp_id,
+            results=result.get('recognized_campers', []),
+            user_id=user_id,
+            username=username
+        )
+        
+        response_data["webhookQueued"] = True
+        
+        return jsonify(response_data), 200
     
     except Exception as e:
         logger.error(f"❌ Error in activity recognition: {e}", exc_info=True)
@@ -1260,7 +1439,7 @@ def mobile_recognize_faces():
             return jsonify({"success": False, "error": "Empty filename"}), 400
         
         # Extract user info from JWT (set by @require_auth middleware)
-        user_id = getattr(g, 'user_id', g.user.get('sub', 'unknown'))
+        user_id = g.user.get('id') or g.user.get('sub') or g.user.get('userId') or 'system'
         username = getattr(g, 'username', g.user.get('name', g.user.get('email', 'unknown')))
         
         validation_time = (datetime.now() - validation_start).total_seconds()
@@ -1320,11 +1499,13 @@ def mobile_recognize_faces():
             f"(camp={camp_id}, group={group_id}, activity={activity_schedule_id})"
         )
         
+        # Generate unique session ID
+        session_id = str(uuid.uuid4())
+        
         # Use existing recognition service (already optimized)
-        results = face_service.check_attendance(
-            image_path=image_path,
-            camp_id=int(camp_id),
-            group_id=int(group_id),
+        result = face_service.check_attendance(
+            image_path=str(image_path),
+            session_id=session_id,
             save_results=False  # Skip disk I/O for speed
         )
         
@@ -1336,27 +1517,32 @@ def mobile_recognize_faces():
         
         total_time = (datetime.now() - start_time).total_seconds()
         
+        # Extract recognized campers from result
+        recognized_faces = result.get('recognized_campers', [])
+        
         # Prepare recognized campers list
         recognized_campers = []
-        for r in results:
+        for r in recognized_faces:
             camper_id = r.get('camper_id', -1)
             if camper_id > 0:  # Only include recognized faces
                 recognized_campers.append({
-                    "camperId": camper_id,
-                    "confidence": round(r.get('confidence', 0.0), 3),
+                    "camperId": int(camper_id),
+                    "confidence": round(1.0 - r.get('distance', 0.0), 3),  # Convert distance to confidence
                     "distance": round(r.get('distance', 0.0), 3),
-                    "boundingBox": r.get('bounding_box'),
-                    "faceArea": r.get('face_area', 0)
+                    "boundingBox": r.get('face_region'),
+                    "faceArea": r.get('face_region', {}).get('width', 0) * r.get('face_region', {}).get('height', 0) if r.get('face_region') else 0
                 })
+        
+        total_faces = result.get('total_faces_detected', 0)
         
         response_data = {
             "success": True,
             "requestId": request_id,
             "recognizedCampers": recognized_campers,
             "summary": {
-                "totalDetected": len(results),
+                "totalDetected": total_faces,
                 "totalRecognized": len(recognized_campers),
-                "totalUnknown": len(results) - len(recognized_campers)
+                "totalUnknown": total_faces - len(recognized_campers)
             },
             "performance": {
                 "totalTime": round(total_time, 3),
@@ -1391,7 +1577,7 @@ def mobile_recognize_faces():
             activity_schedule_id=int(activity_schedule_id),
             group_id=int(group_id),
             camp_id=int(camp_id),
-            results=results,
+            results=recognized_faces,  # Pass the recognized_campers list
             user_id=user_id,
             username=username
         )

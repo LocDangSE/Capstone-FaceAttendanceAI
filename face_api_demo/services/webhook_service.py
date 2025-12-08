@@ -49,7 +49,17 @@ def update_attendance_async(
         service_token = generate_service_jwt()
         
         # Filter only recognized faces (camper_id > 0)
-        recognized_faces = [r for r in results if r.get('camper_id', -1) > 0]
+        # Handle both string and int camper_ids
+        recognized_faces = []
+        for r in results:
+            camper_id = r.get('camper_id', -1)
+            try:
+                camper_id_int = int(camper_id) if camper_id not in [None, -1, '-1'] else -1
+                if camper_id_int > 0:
+                    recognized_faces.append(r)
+            except (ValueError, TypeError):
+                logger.warning(f"[{request_id}] Invalid camper_id: {camper_id}")
+                continue
         
         if not recognized_faces:
             logger.warning(f"[{request_id}] ⚠️ [Async] No recognized faces to update, skipping webhook")
@@ -63,11 +73,16 @@ def update_attendance_async(
             "campId": camp_id,
             "recognizedFaces": [
                 {
-                    "embedding": r['embedding'].tolist() if hasattr(r['embedding'], 'tolist') else r['embedding'],
-                    "confidence": float(r.get('confidence', 0.0)),
-                    "boundingBox": r.get('bounding_box'),
-                    "faceArea": r.get('face_area', 0),
-                    "camperId": r.get('camper_id')  # Include if already matched
+                    "embedding": r.get('embedding', []).tolist() if hasattr(r.get('embedding', []), 'tolist') else (r.get('embedding', []) if r.get('embedding') else []),
+                    "confidence": float(1.0 - r.get('distance', 0.0)),  # Convert distance to confidence
+                    "boundingBox": {
+                        "x": r['face_region']['x'],
+                        "y": r['face_region']['y'],
+                        "width": r['face_region']['width'],
+                        "height": r['face_region']['height']
+                    } if r.get('face_region') else None,
+                    "faceArea": r['face_region']['width'] * r['face_region']['height'] if r.get('face_region') else 0,
+                    "camperId": int(r.get('camper_id', -1))  # Ensure integer
                 }
                 for r in recognized_faces
             ],
@@ -91,6 +106,9 @@ def update_attendance_async(
                     f"[{request_id}] [Async] Attempt {attempt}/{max_retries}: POST {webhook_url}"
                 )
                 
+                # Skip SSL verification for localhost (development only)
+                verify_ssl = not webhook_url.startswith(('https://localhost', 'https://127.0.0.1'))
+                
                 response = requests.post(
                     webhook_url,
                     json=payload,
@@ -100,7 +118,8 @@ def update_attendance_async(
                         "X-Request-ID": request_id,
                         "X-Service-Name": "PythonFaceRecognitionAPI"
                     },
-                    timeout=timeout
+                    timeout=timeout,
+                    verify=verify_ssl  # Skip SSL verification for localhost
                 )
                 
                 webhook_time = time.time() - webhook_start
