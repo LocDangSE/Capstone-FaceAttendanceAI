@@ -160,10 +160,10 @@ class EmbeddingCache:
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     return None
             
-            # Use ThreadPoolExecutor for parallel generation (2 workers for stability)
+            # Use ThreadPoolExecutor for parallel generation (1 worker to avoid TensorFlow deadlock on Windows)
             results = []
             try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
+                with ThreadPoolExecutor(max_workers=1) as executor:
                     futures = [executor.submit(process_single_image, img) for img in image_files]
                     
                     for idx, future in enumerate(futures):
