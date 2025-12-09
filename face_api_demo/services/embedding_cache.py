@@ -617,14 +617,18 @@ class EmbeddingCache:
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         result = redis_client.hgetall(key)
         embeddings = {}
-        # Determine expected shape from model
-        expected_shape = None
-        try:
-            dummy = self.generate_embedding(np.zeros((224, 224, 3), dtype=np.uint8))
-            if dummy is not None:
-                expected_shape = dummy.shape[0]
-        except Exception:
-            expected_shape = None
+        # Determine expected shape based on model name (Facenet=128, Facenet512=512, etc.)
+        model_shapes = {
+            'Facenet': 128,
+            'Facenet512': 512,
+            'VGGFace': 4096,
+            'OpenFace': 128,
+            'DeepFace': 4096,
+            'ArcFace': 512
+        }
+        expected_shape = model_shapes.get(self.model_name, None)
+        logger.info(f"Expected embedding shape for model {self.model_name}: {expected_shape}")
+        
         for camper_id, emb_bytes in result.items():
             arr = np.frombuffer(emb_bytes, dtype=np.float32)
             if expected_shape and arr.shape[0] != expected_shape:

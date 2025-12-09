@@ -602,11 +602,13 @@ def load_camp_face_database(camp_id):
     try:
         logger.info(f"[{request_id}] 📥 START: Loading camp {camp_id} (requested by {g.user.get('sub')})")
         
-        # Get expire_at from request body (sent by .NET)
+        # Get expire_at and force_reload from request body (sent by .NET)
         expire_at = None
+        forceReload = False
         if request.is_json:
             data = request.get_json()
             expire_at = data.get('expire_at')
+            forceReload = data.get('force_reload', False)
         
         if expire_at:
             logger.info(f"[{request_id}] 📅 Redis TTL will expire at Unix timestamp: {expire_at}")
@@ -616,9 +618,11 @@ def load_camp_face_database(camp_id):
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
         logger.info(f"[{request_id}] Checking camp folder: {camp_folder}")
         logger.info(f"[{request_id}] Folder exists: {camp_folder.exists()}")
+        logger.info(f"[{request_id}] Force reload: {forceReload}")
         
         # ✅ FIXED: Check filesystem instead of worker-specific loaded_camps
-        if camp_folder.exists():
+        # Skip early return if forceReload=true to ensure embeddings are regenerated
+        if camp_folder.exists() and not forceReload:
             # Count existing faces in filesystem
             total_faces = 0
             groups = []
@@ -631,6 +635,7 @@ def load_camp_face_database(camp_id):
             
             if total_faces > 0:
                 logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded on filesystem ({total_faces} faces)")
+                logger.info(f"[{request_id}] ℹ️ Skipping regeneration since forceReload=false")
                 
                 # Load embeddings into cache if not already cached
                 cached_count = len(face_service.embedding_cache.cache)
@@ -648,6 +653,8 @@ def load_camp_face_database(camp_id):
                     "face_count": total_faces,
                     "groups": groups
                 }), 200
+            elif forceReload:
+                logger.info(f"[{request_id}] 🔄 forceReload=true, proceeding with regeneration")
         
         # Check Supabase configuration
         logger.info(f"[{request_id}] Checking Supabase configuration...")
@@ -787,6 +794,7 @@ def load_camp_face_database(camp_id):
     
     except Exception as e:
         logger.error(f"[{request_id}] ❌ EXCEPTION in load_camp_face_database: {str(e)}")
+        import traceback
         logger.error(f"[{request_id}] {traceback.format_exc()}")
         return jsonify({
             "success": False,
