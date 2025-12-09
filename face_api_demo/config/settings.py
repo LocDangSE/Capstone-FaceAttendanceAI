@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     JWT_AUDIENCE_WHITELIST: str = Field(default="face-recognition-api,https://localhost:7075,https://inheritable-narcisa-uncuriously.ngrok-free.dev,https://summercampapi-339197681269.asia-southeast1.run.app", description="Comma-separated list of allowed audiences")
     
     # ==================== DeepFace Settings ====================
-    DEEPFACE_MODEL: str = Field(default="Facenet512", description="Face recognition model")
+    DEEPFACE_MODEL: str = Field(default="Facenet", description="Face recognition model")
     DEEPFACE_DETECTOR: str = Field(default="opencv", description="Face detector backend")
     DEEPFACE_DISTANCE_METRIC: str = Field(default="cosine", description="Distance metric for comparison")
     CONFIDENCE_THRESHOLD: float = Field(default=0.6, description="Recognition confidence threshold (0.0-1.0)")
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_model(cls, v):
         """Validate DeepFace model name"""
-        valid_models = ['VGG-Face', 'Facenet', 'Facenet512', 'OpenFace', 'DeepFace', 'DeepID', 'Dlib', 'ArcFace']
+        valid_models = ['VGG-Face', 'Facenet', 'Facenet', 'OpenFace', 'DeepFace', 'DeepID', 'Dlib', 'ArcFace']
         if v not in valid_models:
             raise ValueError(f'DEEPFACE_MODEL must be one of: {", ".join(valid_models)}')
         return v

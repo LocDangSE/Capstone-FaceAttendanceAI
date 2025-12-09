@@ -64,7 +64,7 @@ class OptimizedEmbeddingCache:
             embeddings_matrix = np.vstack([self.cache[cid] for cid in self.camper_ids_list])
             
             # Create FAISS index
-            dimension = embeddings_matrix.shape[1]  # Should be 512 for Facenet512
+            dimension = embeddings_matrix.shape[1]  # Should be 512 for Facenet
             
             if self.distance_metric == 'cosine':
                 # Normalize vectors for cosine similarity (use inner product)

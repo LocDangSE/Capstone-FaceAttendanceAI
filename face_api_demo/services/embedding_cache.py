@@ -74,18 +74,29 @@ class EmbeddingCache:
         Args:
             preload: Whether to load all embeddings from disk on startup
         """
+        # Temporary RAM cache used ONLY during preload, cleared after Redis storage
         self.cache: Dict[str, np.ndarray] = {}
         self.metadata: Dict[str, Dict] = {}
         self.model_name = settings.DEEPFACE_MODEL
         self.distance_metric = settings.DEEPFACE_DISTANCE_METRIC
+        self.redis_client = redis_client
+        
+        # Validate Redis connection
+        try:
+            self.redis_client.ping()
+            logger.info(f"✅ Redis connection validated")
+        except Exception as e:
+            logger.error(f"❌ Redis connection failed: {e}")
+            raise RuntimeError(f"Redis is required for embedding storage. Connection failed: {e}")
         
         # OPTIMIZATION: Preload model at initialization to avoid first-request latency
         _get_or_load_model(self.model_name)
         
-        logger.info(f"EmbeddingCache initialized with model: {self.model_name}")
+        logger.info(f"EmbeddingCache initialized with model: {self.model_name} (Redis-only mode)")
         
+        # Note: preload disabled in Redis-only mode
         if preload and settings.CACHE_PRELOAD:
-            self._load_all_embeddings()
+            logger.warning("Preload disabled in Redis-only mode. Use /api/face-db/load API instead.")
     
     def _load_all_embeddings(self):
         """Load all embeddings from disk on startup"""
@@ -238,6 +249,10 @@ class EmbeddingCache:
         """
         try:
             # Validate embedding shape
+            # Validate shape match
+            if cached_embeddings.shape[1] != query_embedding.shape[0]:
+                logger.error(f"Shape mismatch: cached ({cached_embeddings.shape[1]}) vs query ({query_embedding.shape[0]}). Skipping comparison.")
+                return None, float('inf'), 0.0
             if embedding.shape != (512,) and embedding.shape != (1, 512):
                 logger.error(f"Invalid embedding shape: {embedding.shape}, expected (512,)")
                 return False
@@ -282,19 +297,17 @@ class EmbeddingCache:
     def generate_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """
         Generate face embedding from image using DeepFace (uses singleton cached model)
-        
+        Logs model name and embedding shape for debugging.
         Args:
             image_path: Path to face image
-            
         Returns:
-            512D numpy array or None on failure
+            Numpy array or None on failure
         """
         try:
+            logger.info(f"[generate_embedding] Using model: {self.model_name}")
             logger.debug(f"Generating embedding for: {image_path}")
-            
             # OPTIMIZATION: Ensure model is loaded (singleton pattern)
             _get_or_load_model(self.model_name)
-            
             # Use DeepFace to generate embedding
             embedding_objs = DeepFace.represent(
                 img_path=image_path,
@@ -302,17 +315,13 @@ class EmbeddingCache:
                 enforce_detection=False,
                 detector_backend=settings.DEEPFACE_DETECTOR
             )
-            
             if not embedding_objs or len(embedding_objs) == 0:
                 logger.error("No embedding generated")
                 return None
-            
             # Extract embedding vector
             embedding = np.array(embedding_objs[0]['embedding'])
-            
-            logger.debug(f"Embedding generated: shape={embedding.shape}")
+            logger.info(f"[generate_embedding] Model: {self.model_name}, Embedding shape: {embedding.shape}")
             return embedding
-        
         except KeyboardInterrupt:
             # Re-raise keyboard interrupt to allow graceful shutdown
             logger.warning(f"Keyboard interrupt during embedding generation for {image_path}")
@@ -397,9 +406,12 @@ class EmbeddingCache:
             if self.distance_metric == 'cosine':
                 # Batch cosine distance
                 query_norm = np.linalg.norm(query_embedding)
+                # Log shapes for debugging
+                logger.info(f"Query embedding shape: {query_embedding.shape}")
+                camper_ids = list(self.cache.keys())
+                cached_embeddings = np.array([self.cache[cid] for cid in camper_ids])
+                logger.info(f"Cached embeddings shape: {cached_embeddings.shape}")
                 cached_norms = np.linalg.norm(cached_embeddings, axis=1)
-                dot_products = np.dot(cached_embeddings, query_embedding)
-                cosine_similarities = dot_products / (cached_norms * query_norm + 1e-8)
                 distances = 1 - cosine_similarities
             elif self.distance_metric == 'euclidean':
                 # Batch Euclidean distance
@@ -580,26 +592,46 @@ class EmbeddingCache:
     def set_embeddings_redis(self, camp_id: int, group_id: int, embeddings: Dict[str, np.ndarray], expire_at: int):
         """
         Store all embeddings for a camp/group in Redis as a HASH, set TTL to expire_at (unix timestamp).
+        Ensures TTL is always set, with fallback to 1 hour if expire_at is missing/invalid.
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         pipe = redis_client.pipeline()
         for camper_id, embedding in embeddings.items():
             pipe.hset(key, camper_id, embedding.tobytes())
-        ttl_seconds = max(0, expire_at - int(datetime.utcnow().timestamp()))
+        now_ts = int(datetime.utcnow().timestamp())
+        # Fallback: 1 hour TTL if expire_at is missing or invalid
+        if not expire_at or expire_at <= now_ts:
+            ttl_seconds = 3600
+            logger.warning(f"⚠️ expire_at missing/invalid for {key}, using fallback TTL: {ttl_seconds}s (1 hour)")
+        else:
+            ttl_seconds = max(0, expire_at - now_ts)
         pipe.expire(key, ttl_seconds)
         pipe.execute()
-        logger.info(f"✅ Redis embeddings set for {key}, TTL {ttl_seconds}s")
+        logger.info(f"✅ Redis embeddings set for {key}, TTL {ttl_seconds}s (expire_at={expire_at}, now={now_ts})")
 
     def get_embeddings_redis(self, camp_id: int, group_id: int) -> Dict[str, np.ndarray]:
         """
         Fetch all embeddings for a camp/group from Redis HASH, decode to numpy arrays.
+        Enforces expected shape from current model; skips and logs mismatches.
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         result = redis_client.hgetall(key)
         embeddings = {}
+        # Determine expected shape from model
+        expected_shape = None
+        try:
+            dummy = self.generate_embedding(np.zeros((224, 224, 3), dtype=np.uint8))
+            if dummy is not None:
+                expected_shape = dummy.shape[0]
+        except Exception:
+            expected_shape = None
         for camper_id, emb_bytes in result.items():
-            embeddings[camper_id.decode() if isinstance(camper_id, bytes) else camper_id] = np.frombuffer(emb_bytes, dtype=np.float32)
-        logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers")
+            arr = np.frombuffer(emb_bytes, dtype=np.float32)
+            if expected_shape and arr.shape[0] != expected_shape:
+                logger.warning(f"Skipping embedding for {camper_id}: shape {arr.shape[0]} != expected {expected_shape}")
+                continue
+            embeddings[camper_id.decode() if isinstance(camper_id, bytes) else camper_id] = arr
+        logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers (shape checked)")
         return embeddings
 
     def fetch_embeddings_for_recognition(self, camp_id: int, group_id: int, use_hot_cache: bool = True) -> Dict[str, np.ndarray]:
