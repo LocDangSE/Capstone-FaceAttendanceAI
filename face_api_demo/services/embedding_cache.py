@@ -12,9 +12,15 @@ from datetime import datetime
 import json
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import os
+import redis
 
 from config.settings import settings, get_embedding_path
 from utils import get_now
+
+# Initialize Redis client
+REDIS_URL = os.getenv('REDIS_URL', 'sample-string')
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=False)
 
 logger = logging.getLogger(__name__)
 
@@ -465,6 +471,58 @@ class EmbeddingCache:
             'embeddings_folder': str(settings.EMBEDDINGS_FOLDER)
         }
     
+    def get_redis_stats(self) -> Dict:
+        """
+        Get Redis statistics for face embeddings
+        
+        Returns:
+            Dictionary with Redis statistics
+        """
+        try:
+            # Get all face embedding keys
+            pattern = "face:embeddings:camp:*:group:*"
+            keys = redis_client.keys(pattern)
+            
+            redis_stats = {
+                'total_keys': len(keys),
+                'keys': [key.decode() if isinstance(key, bytes) else key for key in keys],
+                'camp_groups': {}
+            }
+            
+            # Get details for each key
+            for key in keys:
+                key_str = key.decode() if isinstance(key, bytes) else key
+                # Parse camp and group from key
+                parts = key_str.split(':')
+                if len(parts) >= 5:
+                    camp_id = parts[3]
+                    group_id = parts[5]
+                    
+                    # Get hash length (number of embeddings)
+                    hash_len = redis_client.hlen(key)
+                    # Get TTL
+                    ttl = redis_client.ttl(key)
+                    
+                    if camp_id not in redis_stats['camp_groups']:
+                        redis_stats['camp_groups'][camp_id] = {}
+                    
+                    redis_stats['camp_groups'][camp_id][group_id] = {
+                        'embeddings_count': hash_len,
+                        'ttl_seconds': ttl,
+                        'expires_at': None if ttl == -1 else int(datetime.utcnow().timestamp()) + ttl
+                    }
+            
+            return redis_stats
+            
+        except Exception as e:
+            logger.error(f"Error getting Redis stats: {e}")
+            return {
+                'error': str(e),
+                'total_keys': 0,
+                'keys': [],
+                'camp_groups': {}
+            }
+    
     def clear_cache(self, camper_id: Optional[str] = None):
         """
         Clear cache (all or specific camper)
@@ -518,3 +576,45 @@ class EmbeddingCache:
         except Exception as e:
             logger.error(f"Error deleting embedding for {camper_id}: {e}")
             return False
+        
+    def set_embeddings_redis(self, camp_id: int, group_id: int, embeddings: Dict[str, np.ndarray], expire_at: int):
+        """
+        Store all embeddings for a camp/group in Redis as a HASH, set TTL to expire_at (unix timestamp).
+        """
+        key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
+        pipe = redis_client.pipeline()
+        for camper_id, embedding in embeddings.items():
+            pipe.hset(key, camper_id, embedding.tobytes())
+        ttl_seconds = max(0, expire_at - int(datetime.utcnow().timestamp()))
+        pipe.expire(key, ttl_seconds)
+        pipe.execute()
+        logger.info(f"✅ Redis embeddings set for {key}, TTL {ttl_seconds}s")
+
+    def get_embeddings_redis(self, camp_id: int, group_id: int) -> Dict[str, np.ndarray]:
+        """
+        Fetch all embeddings for a camp/group from Redis HASH, decode to numpy arrays.
+        """
+        key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
+        result = redis_client.hgetall(key)
+        embeddings = {}
+        for camper_id, emb_bytes in result.items():
+            embeddings[camper_id.decode() if isinstance(camper_id, bytes) else camper_id] = np.frombuffer(emb_bytes, dtype=np.float32)
+        logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers")
+        return embeddings
+
+    def fetch_embeddings_for_recognition(self, camp_id: int, group_id: int, use_hot_cache: bool = True) -> Dict[str, np.ndarray]:
+        """
+        Optimized recognition read path: fetch embeddings from Redis, lazy decode, use RAM hot cache if enabled.
+        """
+        cache_key = f"camp_{camp_id}_group_{group_id}"
+        # RAM hot cache
+        if use_hot_cache and hasattr(self, 'hot_cache') and cache_key in self.hot_cache:
+            logger.info(f"🔥 RAM hot cache hit for {cache_key}")
+            return self.hot_cache[cache_key]
+        # Redis fetch
+        embeddings = self.get_embeddings_redis(camp_id, group_id)
+        if use_hot_cache:
+            if not hasattr(self, 'hot_cache'):
+                self.hot_cache = {}
+            self.hot_cache[cache_key] = embeddings
+        return embeddings

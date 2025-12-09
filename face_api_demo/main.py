@@ -305,9 +305,86 @@ def openapi_spec():
             "/api/face-db/stats": {
                 "get": {
                     "summary": "Get face database statistics",
+                    "description": "Returns comprehensive statistics about loaded camps, in-memory cache, and Redis-persistent embeddings storage.",
                     "tags": ["Face Database"],
                     "security": [{"bearerAuth": []}],
-                    "responses": {"200": {"description": "Statistics retrieved successfully"}}
+                    "responses": {
+                        "200": {
+                            "description": "Statistics retrieved successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "loaded_camps": {
+                                                "type": "object",
+                                                "description": "Dictionary of loaded camps with face counts",
+                                                "additionalProperties": {"type": "integer"}
+                                            },
+                                            "total_camps": {"type": "integer", "description": "Total number of loaded camps"},
+                                            "cache_stats": {
+                                                "type": "object",
+                                                "description": "In-memory cache statistics",
+                                                "properties": {
+                                                    "total_cached": {"type": "integer", "description": "Number of embeddings in memory"},
+                                                    "campers": {"type": "array", "items": {"type": "string"}, "description": "List of cached camper IDs"},
+                                                    "model": {"type": "string", "description": "DeepFace model name"},
+                                                    "distance_metric": {"type": "string", "description": "Distance metric used"},
+                                                    "fps_limit": {"type": "integer", "description": "Recognition FPS limit"},
+                                                    "threshold": {"type": "number", "description": "Confidence threshold"}
+                                                }
+                                            },
+                                            "redis_stats": {
+                                                "type": "object",
+                                                "description": "Redis persistent storage statistics",
+                                                "properties": {
+                                                    "total_keys": {"type": "integer", "description": "Total number of Redis keys"},
+                                                    "keys": {"type": "array", "items": {"type": "string"}, "description": "List of Redis keys"},
+                                                    "camp_groups": {
+                                                        "type": "object",
+                                                        "description": "Camp and group breakdown",
+                                                        "additionalProperties": {
+                                                            "type": "object",
+                                                            "additionalProperties": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "embeddings_count": {"type": "integer", "description": "Number of embeddings in this group"},
+                                                                    "ttl_seconds": {"type": "integer", "description": "Time to live in seconds (-1 for no expiration)"},
+                                                                    "expires_at": {"type": "integer", "description": "Unix timestamp when key expires"}
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "example": {
+                                        "loaded_camps": {"17": 7, "18": 12},
+                                        "total_camps": 2,
+                                        "cache_stats": {
+                                            "total_cached": 0,
+                                            "campers": [],
+                                            "model": "Facenet512",
+                                            "distance_metric": "cosine",
+                                            "fps_limit": 30,
+                                            "threshold": 0.4
+                                        },
+                                        "redis_stats": {
+                                            "total_keys": 2,
+                                            "keys": ["face:embeddings:camp:17:group:14", "face:embeddings:camp:17:group:15"],
+                                            "camp_groups": {
+                                                "17": {
+                                                    "14": {"embeddings_count": 3, "ttl_seconds": 86400, "expires_at": 1733779200},
+                                                    "15": {"embeddings_count": 4, "ttl_seconds": 86400, "expires_at": 1733779200}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "/api/recognition/recognize-group/{camp_id}/{group_id}": {
@@ -518,10 +595,22 @@ def load_camp_face_database(camp_id):
     """
     Load face database for a specific camp from Supabase
     Downloads face images and generates embeddings for all camper groups
+    Stores embeddings in Redis with TTL based on camp end date
     """
     request_id = str(uuid.uuid4())[:8]
     try:
         logger.info(f"[{request_id}] 📥 START: Loading camp {camp_id} (requested by {g.user.get('sub')})")
+        
+        # Get expire_at from request body (sent by .NET)
+        expire_at = None
+        if request.is_json:
+            data = request.get_json()
+            expire_at = data.get('expire_at')
+        
+        if expire_at:
+            logger.info(f"[{request_id}] 📅 Redis TTL will expire at Unix timestamp: {expire_at}")
+        else:
+            logger.info(f"[{request_id}] ⏰ No expire_at provided, using default 1-hour TTL")
         
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
         logger.info(f"[{request_id}] Checking camp folder: {camp_folder}")
@@ -618,16 +707,25 @@ def load_camp_face_database(camp_id):
         
         logger.info(f"[{request_id}] Found {len(groups_data)} groups")
         
-        # Load embeddings for each group
+        # Load embeddings for each group and store in Redis immediately
         successfully_loaded = 0
         for group_id, face_files in groups_data.items():
             try:
                 group_folder = camp_folder / f"camper_group_{group_id}"
                 logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
+                
+                # Clear cache before loading each group to avoid mixing embeddings
+                face_service.embedding_cache.clear_cache()
                 face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+                
+                # Store this group's embeddings in Redis immediately
+                if expire_at and face_service.embedding_cache.cache:
+                    face_service.embedding_cache.set_embeddings_redis(camp_id, group_id, face_service.embedding_cache.cache, expire_at)
+                    logger.info(f"[{request_id}] ✅ Stored {len(face_service.embedding_cache.cache)} embeddings for group {group_id} in Redis")
+                
                 total_faces += len(face_files)
                 successfully_loaded += 1
-                logger.info(f"[{request_id}] ✅ Group {group_id} embeddings loaded successfully")
+                logger.info(f"[{request_id}] ✅ Group {group_id} embeddings loaded and stored successfully")
             except Exception as group_error:
                 logger.error(f"[{request_id}] ❌ Failed to load embeddings for group {group_id}: {group_error}")
                 import traceback
@@ -800,21 +898,12 @@ def get_camp_stats():
                         # Return face_count directly (not nested) for .NET compatibility
                         detected_camps[camp_id] = total_faces
         
-        # Cache stats for debugging
-        cached_count = len(face_service.embedding_cache.cache)
-        cached_campers = list(face_service.embedding_cache.cache.keys())
-        
+        # Only report Redis-based embedding stats
+        redis_stats = face_service.embedding_cache.get_redis_stats()
         return jsonify({
             "loaded_camps": detected_camps,
             "total_camps": len(detected_camps),
-            "cache_stats": {
-                "total_cached": cached_count,
-                "campers": cached_campers,
-                "model": settings.DEEPFACE_MODEL,
-                "distance_metric": settings.DEEPFACE_DISTANCE_METRIC,
-                "fps_limit": settings.RECOGNITION_FPS_LIMIT,
-                "threshold": settings.CONFIDENCE_THRESHOLD
-            }
+            "redis_stats": redis_stats
         }), 200
     
     except Exception as e:
@@ -1062,16 +1151,18 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        # Check if embeddings are cached (eager loaded during face-db load)
-        cached_count = len(face_service.embedding_cache.cache)
-        if cached_count == 0:
-            logger.warning(f"⚠️ No embeddings cached for group {group_id}. This should have been loaded via /api/face-db/load/{camp_id}")
-            logger.info(f"⚡ Loading embeddings for group {group_id} now...")
-            face_service.embedding_cache.clear_cache()
-            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-            logger.info(f"✅ Cached {len(face_service.embedding_cache.cache)} embeddings")
+        # Only use Redis embeddings, do not fall back to RAM or filesystem
+        embeddings = face_service.embedding_cache.get_embeddings_redis(camp_id, group_id)
+        if not embeddings:
+            logger.warning(f"⚠️ No embeddings found in Redis for camp {camp_id}, group {group_id}")
+            return jsonify({
+                "success": False,
+                "message": f"No embeddings found in Redis for camp {camp_id}, group {group_id}. Please preload the camp/group.",
+                "campId": camp_id,
+                "groupId": group_id
+            }), 404
         else:
-            logger.info(f"✅ Using {cached_count} cached embeddings for recognition")
+            logger.info(f"✅ Using {len(embeddings)} embeddings from Redis for recognition")
         
         session_id = str(uuid.uuid4())
         
@@ -1524,6 +1615,8 @@ def mobile_recognize_faces():
         recognized_campers = []
         for r in recognized_faces:
             camper_id = r.get('camper_id', -1)
+            # Convert to int safely (handle string or int)
+            camper_id = int(camper_id) if camper_id not in [None, -1, '-1'] else -1
             if camper_id > 0:  # Only include recognized faces
                 recognized_campers.append({
                     "camperId": int(camper_id),
