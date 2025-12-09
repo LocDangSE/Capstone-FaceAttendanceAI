@@ -249,12 +249,8 @@ class EmbeddingCache:
         """
         try:
             # Validate embedding shape
-            # Validate shape match
-            if cached_embeddings.shape[1] != query_embedding.shape[0]:
-                logger.error(f"Shape mismatch: cached ({cached_embeddings.shape[1]}) vs query ({query_embedding.shape[0]}). Skipping comparison.")
-                return None, float('inf'), 0.0
-            if embedding.shape != (512,) and embedding.shape != (1, 512):
-                logger.error(f"Invalid embedding shape: {embedding.shape}, expected (512,)")
+            if embedding.shape != (512,) and embedding.shape != (1, 512) and embedding.shape != (128,) and embedding.shape != (1, 128):
+                logger.error(f"Invalid embedding shape: {embedding.shape}, expected (128,) or (512,)")
                 return False
             
             # Ensure 1D array
@@ -405,13 +401,18 @@ class EmbeddingCache:
             # Vectorized distance calculation
             if self.distance_metric == 'cosine':
                 # Batch cosine distance
-                query_norm = np.linalg.norm(query_embedding)
-                # Log shapes for debugging
                 logger.info(f"Query embedding shape: {query_embedding.shape}")
-                camper_ids = list(self.cache.keys())
-                cached_embeddings = np.array([self.cache[cid] for cid in camper_ids])
                 logger.info(f"Cached embeddings shape: {cached_embeddings.shape}")
+                
+                # Validate shape compatibility
+                if cached_embeddings.shape[1] != query_embedding.shape[0]:
+                    logger.error(f"Shape mismatch: cached ({cached_embeddings.shape[1]}) vs query ({query_embedding.shape[0]}). Skipping comparison.")
+                    return None, float('inf'), 0.0
+                
+                query_norm = np.linalg.norm(query_embedding)
                 cached_norms = np.linalg.norm(cached_embeddings, axis=1)
+                dot_products = np.dot(cached_embeddings, query_embedding)
+                cosine_similarities = dot_products / (cached_norms * query_norm + 1e-8)
                 distances = 1 - cosine_similarities
             elif self.distance_metric == 'euclidean':
                 # Batch Euclidean distance
@@ -593,13 +594,24 @@ class EmbeddingCache:
         """
         Store all embeddings for a camp/group in Redis as a HASH, set TTL to expire_at (unix timestamp).
         Ensures TTL is always set, with fallback to 1 hour if expire_at is missing/invalid.
+        Validates embedding shapes before storing.
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
+        
+        # Validate all embeddings have the same shape
+        if embeddings:
+            shapes = set(emb.shape[0] for emb in embeddings.values())
+            if len(shapes) > 1:
+                logger.error(f"❌ Inconsistent embedding shapes in group {group_id}: {shapes}")
+                raise ValueError(f"Cannot store embeddings with mixed shapes: {shapes}")
+            embedding_dim = shapes.pop()
+            logger.info(f"📊 Storing {len(embeddings)} embeddings with shape ({embedding_dim},) for {key}")
+        
         pipe = redis_client.pipeline()
         for camper_id, embedding in embeddings.items():
             pipe.hset(key, camper_id, embedding.tobytes())
         now_ts = int(datetime.utcnow().timestamp())
-        # Fallback: 1 hour TTL if expire_at is missing or invalid
+        # Fallback: 1 hour TTL if expire_at is missing/invalid
         if not expire_at or expire_at <= now_ts:
             ttl_seconds = 3600
             logger.warning(f"⚠️ expire_at missing/invalid for {key}, using fallback TTL: {ttl_seconds}s (1 hour)")

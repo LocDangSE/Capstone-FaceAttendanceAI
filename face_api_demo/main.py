@@ -633,7 +633,7 @@ def load_camp_face_database(camp_id):
                     face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
                     total_faces += len(face_files)
             
-            if total_faces > 0:
+            if total_faces > 0 and not forceReload:
                 logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded on filesystem ({total_faces} faces)")
                 logger.info(f"[{request_id}] ℹ️ Skipping regeneration since forceReload=false")
                 
@@ -653,65 +653,80 @@ def load_camp_face_database(camp_id):
                     "face_count": total_faces,
                     "groups": groups
                 }), 200
-            elif forceReload:
-                logger.info(f"[{request_id}] 🔄 forceReload=true, proceeding with regeneration")
+            elif forceReload and total_faces > 0:
+                logger.info(f"[{request_id}] 🔄 forceReload=true, skipping Supabase download, regenerating embeddings from existing files")
+                # Skip Supabase download, use existing local files for embedding generation
+                groups_data = {}
+                for group_folder in camp_folder.iterdir():
+                    if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                        group_id = int(group_folder.name.replace('camper_group_', ''))
+                        face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
+                        groups_data[group_id] = [str(f) for f in face_files]
+                logger.info(f"[{request_id}] Found {len(groups_data)} groups from existing files")
+                # Jump to embedding generation section
+                skip_supabase = True
+            else:
+                skip_supabase = False
         
-        # Check Supabase configuration
-        logger.info(f"[{request_id}] Checking Supabase configuration...")
-        logger.info(f"[{request_id}] SUPABASE_ENABLED: {settings.SUPABASE_ENABLED}")
-        
-        if not settings.SUPABASE_ENABLED:
-            logger.error(f"[{request_id}] ❌ Supabase is disabled in configuration")
-            return jsonify({
-                "success": False,
-                "message": "Supabase storage is not enabled"
-            }), 500
-        
-        # Download avatar images from Supabase
-        logger.info(f"[{request_id}] 📥 Downloading face images from Supabase for camp {camp_id}...")
-        try:
-            downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
-            logger.info(f"[{request_id}] ✅ Downloaded {len(downloaded_files)} face images")
-        except Exception as supabase_error:
-            logger.error(f"[{request_id}] ❌ Supabase download error: {str(supabase_error)}")
-            logger.error(f"[{request_id}] {traceback.format_exc()}")
-            return jsonify({
-                "success": False,
-                "message": f"Supabase error: {str(supabase_error)}",
-                "camp_id": camp_id
-            }), 500
-        
-        if not downloaded_files:
-            logger.warning(f"[{request_id}] ⚠️ No face images found for camp {camp_id}")
-            return jsonify({
-                "success": False,
-                "message": f"No face images found for camp {camp_id}",
-                "camp_id": camp_id
-            }), 404
-        
-        # Organize by groups and generate embeddings
-        logger.info(f"[{request_id}] Organizing files by groups...")
-        groups_data = {}
-        total_faces = 0
-        
-        for idx, file_path in enumerate(downloaded_files, 1):
-            if idx % 10 == 0:
-                logger.info(f"[{request_id}] Progress: {idx}/{len(downloaded_files)} files processed")
+        # Download from Supabase only if needed
+        if not skip_supabase:
+            # Check Supabase configuration
+            logger.info(f"[{request_id}] Checking Supabase configuration...")
+            logger.info(f"[{request_id}] SUPABASE_ENABLED: {settings.SUPABASE_ENABLED}")
             
-            path = Path(file_path)
-            parts = path.parts
+            if not settings.SUPABASE_ENABLED:
+                logger.error(f"[{request_id}] ❌ Supabase is disabled in configuration")
+                return jsonify({
+                    "success": False,
+                    "message": "Supabase storage is not enabled"
+                }), 500
             
-            group_folder_name = None
-            for part in parts:
-                if part.startswith('camper_group_'):
-                    group_folder_name = part
-                    break
+            # Download avatar images from Supabase
+            logger.info(f"[{request_id}] 📥 Downloading face images from Supabase for camp {camp_id}...")
+            try:
+                downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
+                logger.info(f"[{request_id}] ✅ Downloaded {len(downloaded_files)} face images")
+            except Exception as supabase_error:
+                logger.error(f"[{request_id}] ❌ Supabase download error: {str(supabase_error)}")
+                import traceback
+                logger.error(f"[{request_id}] {traceback.format_exc()}")
+                return jsonify({
+                    "success": False,
+                    "message": f"Supabase error: {str(supabase_error)}",
+                    "camp_id": camp_id
+                }), 500
             
-            if group_folder_name:
-                group_id = int(group_folder_name.replace('camper_group_', ''))
-                if group_id not in groups_data:
-                    groups_data[group_id] = []
-                groups_data[group_id].append(file_path)
+            if not downloaded_files:
+                logger.warning(f"[{request_id}] ⚠️ No face images found for camp {camp_id}")
+                return jsonify({
+                    "success": False,
+                    "message": f"No face images found for camp {camp_id}",
+                    "camp_id": camp_id
+                }), 404
+            
+            # Organize by groups and generate embeddings
+            logger.info(f"[{request_id}] Organizing files by groups...")
+            groups_data = {}
+            total_faces = 0
+            
+            for idx, file_path in enumerate(downloaded_files, 1):
+                if idx % 10 == 0:
+                    logger.info(f"[{request_id}] Progress: {idx}/{len(downloaded_files)} files processed")
+                
+                path = Path(file_path)
+                parts = path.parts
+                
+                group_folder_name = None
+                for part in parts:
+                    if part.startswith('camper_group_'):
+                        group_folder_name = part
+                        break
+                
+                if group_folder_name:
+                    group_id = int(group_folder_name.replace('camper_group_', ''))
+                    if group_id not in groups_data:
+                        groups_data[group_id] = []
+                    groups_data[group_id].append(file_path)
         
         logger.info(f"[{request_id}] Found {len(groups_data)} groups")
         
