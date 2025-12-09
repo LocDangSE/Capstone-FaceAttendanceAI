@@ -605,6 +605,7 @@ def load_camp_face_database(camp_id):
         # Get expire_at and force_reload from request body (sent by .NET)
         expire_at = None
         forceReload = False
+        skip_supabase = False  # Ensure variable is always defined
         if request.is_json:
             data = request.get_json()
             expire_at = data.get('expire_at')
@@ -620,7 +621,7 @@ def load_camp_face_database(camp_id):
         logger.info(f"[{request_id}] Folder exists: {camp_folder.exists()}")
         logger.info(f"[{request_id}] Force reload: {forceReload}")
         
-        # ✅ FIXED: Check filesystem instead of worker-specific loaded_camps
+        # ✅ FIXED: Check Redis first (source of truth), not RAM or filesystem
         # Skip early return if forceReload=true to ensure embeddings are regenerated
         if camp_folder.exists() and not forceReload:
             # Count existing faces in filesystem
@@ -635,24 +636,35 @@ def load_camp_face_database(camp_id):
             
             if total_faces > 0 and not forceReload:
                 logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded on filesystem ({total_faces} faces)")
-                logger.info(f"[{request_id}] ℹ️ Skipping regeneration since forceReload=false")
                 
-                # Load embeddings into cache if not already cached
-                cached_count = len(face_service.embedding_cache.cache)
-                if cached_count == 0:
-                    logger.info(f"[{request_id}] Loading embeddings from filesystem into cache...")
-                    for group_id in groups:
-                        group_folder = camp_folder / f"camper_group_{group_id}"
-                        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-                    logger.info(f"[{request_id}] ✅ Loaded {len(face_service.embedding_cache.cache)} embeddings into cache")
+                # ✅ CRITICAL FIX: Check if Redis has embeddings for ALL groups
+                redis_has_all_groups = True
+                for group_id in groups:
+                    redis_embeddings = face_service.embedding_cache.get_embeddings_redis(camp_id, group_id)
+                    if not redis_embeddings:
+                        logger.warning(f"[{request_id}] ⚠️ Redis missing embeddings for group {group_id}")
+                        redis_has_all_groups = False
+                        break
                 
-                return jsonify({
-                    "success": True,
-                    "message": f"Camp {camp_id} already loaded (filesystem check)",
-                    "camp_id": camp_id,
-                    "face_count": total_faces,
-                    "groups": groups
-                }), 200
+                if redis_has_all_groups:
+                    logger.info(f"[{request_id}] ✅ All groups already in Redis, skipping regeneration")
+                    return jsonify({
+                        "success": True,
+                        "message": f"Camp {camp_id} already loaded in Redis",
+                        "camp_id": camp_id,
+                        "face_count": total_faces,
+                        "groups": groups
+                    }), 200
+                else:
+                    logger.info(f"[{request_id}] 🔄 Redis incomplete, regenerating embeddings from filesystem")
+                    # Fall through to regeneration logic
+                    skip_supabase = True
+                    groups_data = {}
+                    for group_folder in camp_folder.iterdir():
+                        if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                            group_id = int(group_folder.name.replace('camper_group_', ''))
+                            face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
+                            groups_data[group_id] = [str(f) for f in face_files]
             elif forceReload and total_faces > 0:
                 logger.info(f"[{request_id}] 🔄 forceReload=true, skipping Supabase download, regenerating embeddings from existing files")
                 # Skip Supabase download, use existing local files for embedding generation

@@ -315,8 +315,10 @@ class EmbeddingCache:
                 logger.error("No embedding generated")
                 return None
             # Extract embedding vector
-            embedding = np.array(embedding_objs[0]['embedding'])
-            logger.info(f"[generate_embedding] Model: {self.model_name}, Embedding shape: {embedding.shape}")
+            embedding = np.array(embedding_objs[0]['embedding'], dtype=np.float64)
+            # CRITICAL: Ensure float32 to match expected storage format
+            embedding = embedding.astype(np.float32)
+            logger.info(f"[generate_embedding] Model: {self.model_name}, Embedding shape: {embedding.shape}, dtype: {embedding.dtype}, actual_dim: {embedding.shape[0]}")
             return embedding
         except KeyboardInterrupt:
             # Re-raise keyboard interrupt to allow graceful shutdown
@@ -595,6 +597,7 @@ class EmbeddingCache:
         Store all embeddings for a camp/group in Redis as a HASH, set TTL to expire_at (unix timestamp).
         Ensures TTL is always set, with fallback to 1 hour if expire_at is missing/invalid.
         Validates embedding shapes before storing.
+        CRITICAL: Deletes old key first to prevent shape mismatches from old embeddings.
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         
@@ -607,9 +610,25 @@ class EmbeddingCache:
             embedding_dim = shapes.pop()
             logger.info(f"📊 Storing {len(embeddings)} embeddings with shape ({embedding_dim},) for {key}")
         
+        # CRITICAL FIX: Delete old key first to prevent old embeddings from persisting
+        old_count = redis_client.hlen(key)
+        if old_count > 0:
+            logger.info(f"🗑️  Deleting old Redis key {key} (had {old_count} embeddings)")
+            deleted = redis_client.delete(key)
+            logger.info(f"🗑️  Redis DELETE returned: {deleted} (1=success)")
+        else:
+            logger.info(f"📝 No existing key to delete for {key}")
+        
         pipe = redis_client.pipeline()
+        bytes_info = []
         for camper_id, embedding in embeddings.items():
-            pipe.hset(key, camper_id, embedding.tobytes())
+            # CRITICAL: Convert to float32 to ensure consistent 4-byte storage
+            embedding_f32 = embedding.astype(np.float32)
+            emb_bytes = embedding_f32.tobytes()
+            bytes_info.append(f"{camper_id}:{len(emb_bytes)}bytes")
+            logger.debug(f"[STORAGE] {camper_id}: dtype={embedding.dtype}→{embedding_f32.dtype}, shape={embedding.shape}, bytes={len(emb_bytes)}")
+            pipe.hset(key, camper_id, emb_bytes)
+        logger.info(f"📦 [STORAGE] Storing embeddings: {', '.join(bytes_info)}")
         now_ts = int(datetime.utcnow().timestamp())
         # Fallback: 1 hour TTL if expire_at is missing/invalid
         if not expire_at or expire_at <= now_ts:
@@ -628,6 +647,7 @@ class EmbeddingCache:
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         result = redis_client.hgetall(key)
+        logger.info(f"📥 [RETRIEVAL] Redis returned {len(result)} embeddings for {key}")
         embeddings = {}
         # Determine expected shape based on model name (Facenet=128, Facenet512=512, etc.)
         model_shapes = {
@@ -641,12 +661,15 @@ class EmbeddingCache:
         expected_shape = model_shapes.get(self.model_name, None)
         logger.info(f"Expected embedding shape for model {self.model_name}: {expected_shape}")
         
+        bytes_info = []
         for camper_id, emb_bytes in result.items():
+            bytes_info.append(f"{camper_id}:{len(emb_bytes)}bytes")
             arr = np.frombuffer(emb_bytes, dtype=np.float32)
             if expected_shape and arr.shape[0] != expected_shape:
-                logger.warning(f"Skipping embedding for {camper_id}: shape {arr.shape[0]} != expected {expected_shape}")
+                logger.warning(f"Skipping embedding for {camper_id}: shape {arr.shape[0]} != expected {expected_shape} (bytes_len={len(emb_bytes)})")
                 continue
             embeddings[camper_id.decode() if isinstance(camper_id, bytes) else camper_id] = arr
+        logger.info(f"📦 [RETRIEVAL] Retrieved embeddings: {', '.join(bytes_info)}")
         logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers (shape checked)")
         return embeddings
 
