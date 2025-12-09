@@ -211,7 +211,7 @@ class CacheStats(BaseModel):
             "example": {
                 "total_cached": 50,
                 "campers": ["550e8400-e29b-41d4-a716-446655440000", "660aed1b-05e7-4259-ae87-57b3c356d398"],
-                "model": "Facenet512",
+                "model": "Facenet",
                 "distance_metric": "cosine",
                 "fps_limit": 1.0,
                 "threshold": 0.6
@@ -232,7 +232,7 @@ class HealthResponse(BaseModel):
             "example": {
                 "status": "healthy",
                 "service": "Face Recognition API",
-                "model": "Facenet512",
+                "model": "Facenet",
                 "timestamp": "2024-01-01T12:00:00Z"
             }
         }

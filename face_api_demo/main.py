@@ -17,6 +17,7 @@ import traceback
 
 from config import settings, setup_logging
 from services import SupabaseService
+from services.embedding_cache import redis_client
 from middleware import init_jwt_middleware, require_auth
 
 # Import optimized services
@@ -305,9 +306,86 @@ def openapi_spec():
             "/api/face-db/stats": {
                 "get": {
                     "summary": "Get face database statistics",
+                    "description": "Returns comprehensive statistics about loaded camps, in-memory cache, and Redis-persistent embeddings storage.",
                     "tags": ["Face Database"],
                     "security": [{"bearerAuth": []}],
-                    "responses": {"200": {"description": "Statistics retrieved successfully"}}
+                    "responses": {
+                        "200": {
+                            "description": "Statistics retrieved successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "loaded_camps": {
+                                                "type": "object",
+                                                "description": "Dictionary of loaded camps with face counts",
+                                                "additionalProperties": {"type": "integer"}
+                                            },
+                                            "total_camps": {"type": "integer", "description": "Total number of loaded camps"},
+                                            "cache_stats": {
+                                                "type": "object",
+                                                "description": "In-memory cache statistics",
+                                                "properties": {
+                                                    "total_cached": {"type": "integer", "description": "Number of embeddings in memory"},
+                                                    "campers": {"type": "array", "items": {"type": "string"}, "description": "List of cached camper IDs"},
+                                                    "model": {"type": "string", "description": "DeepFace model name"},
+                                                    "distance_metric": {"type": "string", "description": "Distance metric used"},
+                                                    "fps_limit": {"type": "integer", "description": "Recognition FPS limit"},
+                                                    "threshold": {"type": "number", "description": "Confidence threshold"}
+                                                }
+                                            },
+                                            "redis_stats": {
+                                                "type": "object",
+                                                "description": "Redis persistent storage statistics",
+                                                "properties": {
+                                                    "total_keys": {"type": "integer", "description": "Total number of Redis keys"},
+                                                    "keys": {"type": "array", "items": {"type": "string"}, "description": "List of Redis keys"},
+                                                    "camp_groups": {
+                                                        "type": "object",
+                                                        "description": "Camp and group breakdown",
+                                                        "additionalProperties": {
+                                                            "type": "object",
+                                                            "additionalProperties": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "embeddings_count": {"type": "integer", "description": "Number of embeddings in this group"},
+                                                                    "ttl_seconds": {"type": "integer", "description": "Time to live in seconds (-1 for no expiration)"},
+                                                                    "expires_at": {"type": "integer", "description": "Unix timestamp when key expires"}
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "example": {
+                                        "loaded_camps": {"17": 7, "18": 12},
+                                        "total_camps": 2,
+                                        "cache_stats": {
+                                            "total_cached": 0,
+                                            "campers": [],
+                                            "model": "Facenet",
+                                            "distance_metric": "cosine",
+                                            "fps_limit": 30,
+                                            "threshold": 0.4
+                                        },
+                                        "redis_stats": {
+                                            "total_keys": 2,
+                                            "keys": ["face:embeddings:camp:17:group:14", "face:embeddings:camp:17:group:15"],
+                                            "camp_groups": {
+                                                "17": {
+                                                    "14": {"embeddings_count": 3, "ttl_seconds": 86400, "expires_at": 1733779200},
+                                                    "15": {"embeddings_count": 4, "ttl_seconds": 86400, "expires_at": 1733779200}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "/api/recognition/recognize-group/{camp_id}/{group_id}": {
@@ -518,17 +596,34 @@ def load_camp_face_database(camp_id):
     """
     Load face database for a specific camp from Supabase
     Downloads face images and generates embeddings for all camper groups
+    Stores embeddings in Redis with TTL based on camp end date
     """
     request_id = str(uuid.uuid4())[:8]
     try:
         logger.info(f"[{request_id}] 📥 START: Loading camp {camp_id} (requested by {g.user.get('sub')})")
         
+        # Get expire_at and force_reload from request body (sent by .NET)
+        expire_at = None
+        forceReload = False
+        skip_supabase = False  # Ensure variable is always defined
+        if request.is_json:
+            data = request.get_json()
+            expire_at = data.get('expire_at')
+            forceReload = data.get('force_reload', False)
+        
+        if expire_at:
+            logger.info(f"[{request_id}] 📅 Redis TTL will expire at Unix timestamp: {expire_at}")
+        else:
+            logger.info(f"[{request_id}] ⏰ No expire_at provided, using default 1-hour TTL")
+        
         camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
         logger.info(f"[{request_id}] Checking camp folder: {camp_folder}")
         logger.info(f"[{request_id}] Folder exists: {camp_folder.exists()}")
+        logger.info(f"[{request_id}] Force reload: {forceReload}")
         
-        # ✅ FIXED: Check filesystem instead of worker-specific loaded_camps
-        if camp_folder.exists():
+        # ✅ FIXED: Check Redis first (source of truth), not RAM or filesystem
+        # Skip early return if forceReload=true to ensure embeddings are regenerated
+        if camp_folder.exists() and not forceReload:
             # Count existing faces in filesystem
             total_faces = 0
             groups = []
@@ -539,111 +634,182 @@ def load_camp_face_database(camp_id):
                     face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
                     total_faces += len(face_files)
             
-            if total_faces > 0:
+            if total_faces > 0 and not forceReload:
                 logger.info(f"[{request_id}] ✅ Camp {camp_id} already loaded on filesystem ({total_faces} faces)")
                 
-                # Load embeddings into cache if not already cached
-                cached_count = len(face_service.embedding_cache.cache)
-                if cached_count == 0:
-                    logger.info(f"[{request_id}] Loading embeddings from filesystem into cache...")
-                    for group_id in groups:
-                        group_folder = camp_folder / f"camper_group_{group_id}"
-                        face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-                    logger.info(f"[{request_id}] ✅ Loaded {len(face_service.embedding_cache.cache)} embeddings into cache")
+                # ✅ CRITICAL FIX: Check if Redis has embeddings for ALL groups
+                redis_has_all_groups = True
+                for group_id in groups:
+                    redis_embeddings = face_service.embedding_cache.get_embeddings_redis(camp_id, group_id)
+                    if not redis_embeddings:
+                        logger.warning(f"[{request_id}] ⚠️ Redis missing embeddings for group {group_id}")
+                        redis_has_all_groups = False
+                        break
                 
+                if redis_has_all_groups:
+                    logger.info(f"[{request_id}] ✅ All groups already in Redis, skipping regeneration")
+                    return jsonify({
+                        "success": True,
+                        "message": f"Camp {camp_id} already loaded in Redis",
+                        "camp_id": camp_id,
+                        "face_count": total_faces,
+                        "groups": groups
+                    }), 200
+                else:
+                    logger.info(f"[{request_id}] 🔄 Redis incomplete, regenerating embeddings from filesystem")
+                    # Fall through to regeneration logic
+                    skip_supabase = True
+                    groups_data = {}
+                    for group_folder in camp_folder.iterdir():
+                        if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                            group_id = int(group_folder.name.replace('camper_group_', ''))
+                            face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
+                            groups_data[group_id] = [str(f) for f in face_files]
+            elif forceReload and total_faces > 0:
+                logger.info(f"[{request_id}] 🔄 forceReload=true, skipping Supabase download, regenerating embeddings from existing files")
+                # Skip Supabase download, use existing local files for embedding generation
+                groups_data = {}
+                for group_folder in camp_folder.iterdir():
+                    if group_folder.is_dir() and group_folder.name.startswith('camper_group_'):
+                        group_id = int(group_folder.name.replace('camper_group_', ''))
+                        face_files = list(group_folder.glob('avatar_*.jpg')) + list(group_folder.glob('avatar_*.png'))
+                        groups_data[group_id] = [str(f) for f in face_files]
+                logger.info(f"[{request_id}] Found {len(groups_data)} groups from existing files")
+                # Jump to embedding generation section
+                skip_supabase = True
+            else:
+                skip_supabase = False
+        
+        # Download from Supabase only if needed
+        if not skip_supabase:
+            # Check Supabase configuration
+            logger.info(f"[{request_id}] Checking Supabase configuration...")
+            logger.info(f"[{request_id}] SUPABASE_ENABLED: {settings.SUPABASE_ENABLED}")
+            
+            if not settings.SUPABASE_ENABLED:
+                logger.error(f"[{request_id}] ❌ Supabase is disabled in configuration")
                 return jsonify({
-                    "success": True,
-                    "message": f"Camp {camp_id} already loaded (filesystem check)",
-                    "camp_id": camp_id,
-                    "face_count": total_faces,
-                    "groups": groups
-                }), 200
-        
-        # Check Supabase configuration
-        logger.info(f"[{request_id}] Checking Supabase configuration...")
-        logger.info(f"[{request_id}] SUPABASE_ENABLED: {settings.SUPABASE_ENABLED}")
-        
-        if not settings.SUPABASE_ENABLED:
-            logger.error(f"[{request_id}] ❌ Supabase is disabled in configuration")
-            return jsonify({
-                "success": False,
-                "message": "Supabase storage is not enabled"
-            }), 500
-        
-        # Download avatar images from Supabase
-        logger.info(f"[{request_id}] 📥 Downloading face images from Supabase for camp {camp_id}...")
-        try:
-            downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
-            logger.info(f"[{request_id}] ✅ Downloaded {len(downloaded_files)} face images")
-        except Exception as supabase_error:
-            logger.error(f"[{request_id}] ❌ Supabase download error: {str(supabase_error)}")
-            logger.error(f"[{request_id}] {traceback.format_exc()}")
-            return jsonify({
-                "success": False,
-                "message": f"Supabase error: {str(supabase_error)}",
-                "camp_id": camp_id
-            }), 500
-        
-        if not downloaded_files:
-            logger.warning(f"[{request_id}] ⚠️ No face images found for camp {camp_id}")
-            return jsonify({
-                "success": False,
-                "message": f"No face images found for camp {camp_id}",
-                "camp_id": camp_id
-            }), 404
-        
-        # Organize by groups and generate embeddings
-        logger.info(f"[{request_id}] Organizing files by groups...")
-        groups_data = {}
-        total_faces = 0
-        
-        for idx, file_path in enumerate(downloaded_files, 1):
-            if idx % 10 == 0:
-                logger.info(f"[{request_id}] Progress: {idx}/{len(downloaded_files)} files processed")
+                    "success": False,
+                    "message": "Supabase storage is not enabled"
+                }), 500
             
-            path = Path(file_path)
-            parts = path.parts
+            # Download avatar images from Supabase
+            logger.info(f"[{request_id}] 📥 Downloading face images from Supabase for camp {camp_id}...")
+            try:
+                downloaded_files = supabase_service.download_camp_faces(camp_id, str(camp_folder))
+                logger.info(f"[{request_id}] ✅ Downloaded {len(downloaded_files)} face images")
+            except Exception as supabase_error:
+                logger.error(f"[{request_id}] ❌ Supabase download error: {str(supabase_error)}")
+                import traceback
+                logger.error(f"[{request_id}] {traceback.format_exc()}")
+                return jsonify({
+                    "success": False,
+                    "message": f"Supabase error: {str(supabase_error)}",
+                    "camp_id": camp_id
+                }), 500
             
-            group_folder_name = None
-            for part in parts:
-                if part.startswith('camper_group_'):
-                    group_folder_name = part
-                    break
+            if not downloaded_files:
+                logger.warning(f"[{request_id}] ⚠️ No face images found for camp {camp_id}")
+                return jsonify({
+                    "success": False,
+                    "message": f"No face images found for camp {camp_id}",
+                    "camp_id": camp_id
+                }), 404
             
-            if group_folder_name:
-                group_id = int(group_folder_name.replace('camper_group_', ''))
-                if group_id not in groups_data:
-                    groups_data[group_id] = []
-                groups_data[group_id].append(file_path)
+            # Organize by groups and generate embeddings
+            logger.info(f"[{request_id}] Organizing files by groups...")
+            groups_data = {}
+            total_faces = 0
+            
+            for idx, file_path in enumerate(downloaded_files, 1):
+                if idx % 10 == 0:
+                    logger.info(f"[{request_id}] Progress: {idx}/{len(downloaded_files)} files processed")
+                
+                path = Path(file_path)
+                parts = path.parts
+                
+                group_folder_name = None
+                for part in parts:
+                    if part.startswith('camper_group_'):
+                        group_folder_name = part
+                        break
+                
+                if group_folder_name:
+                    group_id = int(group_folder_name.replace('camper_group_', ''))
+                    if group_id not in groups_data:
+                        groups_data[group_id] = []
+                    groups_data[group_id].append(file_path)
         
         logger.info(f"[{request_id}] Found {len(groups_data)} groups")
         
-        # Load embeddings for each group
-        successfully_loaded = 0
-        for group_id, face_files in groups_data.items():
-            try:
-                group_folder = camp_folder / f"camper_group_{group_id}"
-                logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
-                face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-                total_faces += len(face_files)
-                successfully_loaded += 1
-                logger.info(f"[{request_id}] ✅ Group {group_id} embeddings loaded successfully")
-            except Exception as group_error:
-                logger.error(f"[{request_id}] ❌ Failed to load embeddings for group {group_id}: {group_error}")
-                import traceback
-                logger.error(f"[{request_id}] Group {group_id} traceback: {traceback.format_exc()}")
-                # Continue processing other groups even if one fails
+        # Acquire preload lock to prevent concurrent preload operations
+        lock_key = f"lock:preload:camp:{camp_id}"
+        lock = redis_client.lock(lock_key, timeout=600)  # 10 min timeout
         
-        if successfully_loaded == 0:
-            logger.error(f"[{request_id}] ❌ Failed to load embeddings for all groups")
+        if not lock.acquire(blocking=False):
+            logger.warning(f"[{request_id}] Camp {camp_id} preload already in progress")
             return jsonify({
                 "success": False,
-                "message": f"Failed to load embeddings for camp {camp_id}",
+                "message": f"Camp {camp_id} is currently being preloaded. Please wait.",
                 "camp_id": camp_id
-            }), 500
+            }), 409
         
-        # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
-        logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {successfully_loaded}/{len(groups_data)} groups")
+        try:
+            # Clear old Redis keys for this camp before preload
+            pattern = f"face:embeddings:camp:{camp_id}:group:*"
+            old_keys = redis_client.keys(pattern)
+            if old_keys:
+                redis_client.delete(*old_keys)
+                logger.info(f"[{request_id}] 🧹 Cleared {len(old_keys)} old Redis keys for camp {camp_id}")
+            
+            # Load embeddings for each group and store in Redis immediately
+            successfully_loaded = 0
+            for group_id, face_files in groups_data.items():
+                try:
+                    group_folder = camp_folder / f"camper_group_{group_id}"
+                    logger.info(f"[{request_id}] ⚡ Generating embeddings for group {group_id} ({len(face_files)} faces)...")
+                    
+                    # Clear cache before loading each group to avoid mixing embeddings
+                    face_service.embedding_cache.clear_cache()
+                    face_service.embedding_cache._load_embeddings_from_folder(group_folder)
+                    
+                    # Store this group's embeddings in Redis immediately with TTL (fallback TTL handled in service)
+                    if face_service.embedding_cache.cache:
+                        face_service.embedding_cache.set_embeddings_redis(camp_id, group_id, face_service.embedding_cache.cache, expire_at)
+                        logger.info(f"[{request_id}] ✅ Stored {len(face_service.embedding_cache.cache)} embeddings for group {group_id} in Redis")
+                    else:
+                        logger.warning(f"[{request_id}] ⚠️ No embeddings generated for group {group_id}, nothing saved to Redis.")
+                    # Clear RAM cache immediately after Redis storage
+                    face_service.embedding_cache.clear_cache()
+                    logger.info(f"[{request_id}] 🧹 Cleared RAM cache after Redis storage")
+                    total_faces += len(face_files)
+                    successfully_loaded += 1
+                    logger.info(f"[{request_id}] ✅ Group {group_id} embeddings loaded and stored successfully")
+                except Exception as group_error:
+                    logger.error(f"[{request_id}] ❌ Failed to load embeddings for group {group_id}: {group_error}")
+                    import traceback
+                    logger.error(f"[{request_id}] Group {group_id} traceback: {traceback.format_exc()}")
+                    # Continue processing other groups even if one fails
+            
+            if successfully_loaded == 0:
+                logger.error(f"[{request_id}] ❌ Failed to load embeddings for all groups")
+                return jsonify({
+                    "success": False,
+                    "message": f"Failed to load embeddings for camp {camp_id}",
+                    "camp_id": camp_id
+                }), 500
+            
+            # Final cleanup: ensure RAM cache is completely empty
+            face_service.embedding_cache.clear_cache()
+            logger.info(f"[{request_id}] 🧹 Final RAM cache cleared - Redis is now the only source")
+            
+            # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
+            logger.info(f"[{request_id}] ✅ COMPLETE: Loaded {total_faces} faces for camp {camp_id} across {successfully_loaded}/{len(groups_data)} groups")
+        
+        finally:
+            # Release preload lock
+            lock.release()
+            logger.info(f"[{request_id}] 🔓 Preload lock released for camp {camp_id}")
         
         return jsonify({
             "success": True,
@@ -655,6 +821,7 @@ def load_camp_face_database(camp_id):
     
     except Exception as e:
         logger.error(f"[{request_id}] ❌ EXCEPTION in load_camp_face_database: {str(e)}")
+        import traceback
         logger.error(f"[{request_id}] {traceback.format_exc()}")
         return jsonify({
             "success": False,
@@ -715,7 +882,7 @@ def cleanup_temp_folder():
 def unload_camp_face_database(camp_id):
     """
     Unload face database for a specific camp
-    Removes from cache and deletes local files
+    Removes from cache, deletes local files, AND clears Redis embeddings
     FIXED: Now checks filesystem instead of worker-specific loaded_camps
     """
     try:
@@ -733,6 +900,7 @@ def unload_camp_face_database(camp_id):
         
         deleted_faces = 0
         deleted_groups = []
+        redis_keys_deleted = 0
         
         # Clear cache for this camp
         for group_folder in camp_folder.glob("camper_group_*"):
@@ -746,12 +914,29 @@ def unload_camp_face_database(camp_id):
                     face_service.embedding_cache.clear_cache(camper_id_str)
                     deleted_faces += 1
         
+        # Delete corresponding Redis embeddings for all groups in this camp
+        redis_client = face_service.embedding_cache.redis_client if hasattr(face_service.embedding_cache, 'redis_client') else None
+        if redis_client:
+            try:
+                pattern = f"face:embeddings:camp:{camp_id}:group:*"
+                redis_keys = redis_client.keys(pattern)
+                if redis_keys:
+                    for key in redis_keys:
+                        redis_client.delete(key)
+                        redis_keys_deleted += 1
+                    logger.info(f"🗑️ Deleted {redis_keys_deleted} Redis embedding keys for camp {camp_id}")
+                else:
+                    logger.info(f"ℹ️ No Redis embedding keys found for camp {camp_id}")
+            except Exception as redis_error:
+                logger.error(f"⚠️ Error deleting Redis keys for camp {camp_id}: {redis_error}")
+                # Continue even if Redis deletion fails
+        
         # Delete local files
         shutil.rmtree(camp_folder)
         logger.info(f"🗑️ Deleted folder: {camp_folder}")
         
         # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
-        logger.info(f"✅ Camp {camp_id} unloaded: {deleted_faces} faces from groups {deleted_groups}")
+        logger.info(f"✅ Camp {camp_id} unloaded: {deleted_faces} faces from groups {deleted_groups}, {redis_keys_deleted} Redis keys deleted")
         
         return jsonify({
             "success": True,
@@ -759,7 +944,8 @@ def unload_camp_face_database(camp_id):
             "camp_id": camp_id,
             "deleted": {
                 "faces": deleted_faces,
-                "groups": deleted_groups
+                "groups": deleted_groups,
+                "redis_keys": redis_keys_deleted
             }
         }), 200
     
@@ -800,21 +986,12 @@ def get_camp_stats():
                         # Return face_count directly (not nested) for .NET compatibility
                         detected_camps[camp_id] = total_faces
         
-        # Cache stats for debugging
-        cached_count = len(face_service.embedding_cache.cache)
-        cached_campers = list(face_service.embedding_cache.cache.keys())
-        
+        # Only report Redis-based embedding stats
+        redis_stats = face_service.embedding_cache.get_redis_stats()
         return jsonify({
             "loaded_camps": detected_camps,
             "total_camps": len(detected_camps),
-            "cache_stats": {
-                "total_cached": cached_count,
-                "campers": cached_campers,
-                "model": settings.DEEPFACE_MODEL,
-                "distance_metric": settings.DEEPFACE_DISTANCE_METRIC,
-                "fps_limit": settings.RECOGNITION_FPS_LIMIT,
-                "threshold": settings.CONFIDENCE_THRESHOLD
-            }
+            "redis_stats": redis_stats
         }), 200
     
     except Exception as e:
@@ -831,17 +1008,14 @@ def clear_all_face_data():
     """
     try:
         logger.warning(f"⚠️ CLEARING ALL FACE DATA (requested by {g.user.get('sub')})")
-        
         deleted_items = {
             "camps_deleted": 0,
             "embeddings_deleted": 0,
             "folders_deleted": []
         }
-        
         # Clear all embedding cache
         face_service.embedding_cache.clear_cache()
         logger.info("✅ Cleared embedding cache")
-        
         # Delete all camp folders
         face_db_root = Path(settings.BASE_DIR) / "face_database"
         if face_db_root.exists():
@@ -851,7 +1025,6 @@ def clear_all_face_data():
                     deleted_items["folders_deleted"].append(camp_folder.name)
                     deleted_items["camps_deleted"] += 1
             logger.info(f"🗑️ Deleted {deleted_items['camps_deleted']} camp folders")
-        
         # Delete all embedding files
         embeddings_dir = Path(settings.BASE_DIR) / "embeddings"
         if embeddings_dir.exists():
@@ -861,85 +1034,43 @@ def clear_all_face_data():
             for json_file in embeddings_dir.glob("*.json"):
                 json_file.unlink()
             logger.info(f"🗑️ Deleted {deleted_items['embeddings_deleted']} embedding files")
-        
         # ✅ FIXED: No need to clear loaded_camps - filesystem is source of truth
         logger.warning(f"✅ ALL FACE DATA CLEARED: {deleted_items}")
-        
         return jsonify({
             "success": True,
             "message": "All face data cleared successfully",
             "deleted": deleted_items
         }), 200
-    
     except Exception as e:
-        logger.error(f"❌ Error clearing all face data: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        logger.error(f"Error clearing all face data: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/api/face-db/clear-camp/<int:camp_id>', methods=['DELETE'])
+# New endpoint: clear all Redis embeddings for a specific camp_id
+@app.route('/api/cache/clear-camp/<int:camp_id>', methods=['DELETE'])
 @require_auth
-def clear_camp_data(camp_id):
+def clear_camp_redis_embeddings(camp_id):
     """
-    Clear face database and embeddings for a specific camp
-    Removes from cache, deletes local files and embeddings
+    Clear all Redis embeddings for a specific camp_id
     """
     try:
-        logger.info(f"🗑️ Clearing camp {camp_id} data (requested by {g.user.get('sub')})")
-        
-        deleted_items = {
-            "camp_id": camp_id,
-            "faces_deleted": 0,
-            "embeddings_deleted": 0,
-            "groups_deleted": []
-        }
-        
-        camp_folder = settings.DATABASE_FOLDER / f"camp_{camp_id}"
-        
-        # Clear cache for this camp's campers
-        if camp_folder.exists():
-            for group_folder in camp_folder.glob("camper_group_*"):
-                group_id = int(group_folder.name.replace('camper_group_', ''))
-                deleted_items["groups_deleted"].append(group_id)
-                
-                for face_file in group_folder.glob("avatar_*.jpg"):
-                    # Extract camper ID from filename (avatar_21_avatar_uuid.jpg)
-                    parts = face_file.stem.split('_')
-                    if len(parts) >= 2:
-                        camper_id_str = parts[1]
-                        face_service.embedding_cache.clear_cache(camper_id_str)
-                        deleted_items["faces_deleted"] += 1
-        
-        # Delete local face files
-        if camp_folder.exists():
-            shutil.rmtree(camp_folder)
-            logger.info(f"🗑️ Deleted folder: {camp_folder}")
-        
-        # Delete embedding files for this camp's campers
-        embeddings_dir = Path(settings.BASE_DIR) / "embeddings"
-        if embeddings_dir.exists():
-            # Note: Embedding files are named by camper UUID, not camp ID
-            # So we can't directly delete by camp. Already removed from cache above.
-            deleted_items["embeddings_deleted"] = deleted_items["faces_deleted"]
-        
-        # ✅ FIXED: No need to update loaded_camps - filesystem is source of truth
-        logger.info(f"✅ Camp {camp_id} cleared: {deleted_items}")
-        
+        redis_client = face_service.embedding_cache.redis_client if hasattr(face_service.embedding_cache, 'redis_client') else None
+        if not redis_client:
+            return jsonify({"success": False, "error": "Redis client not available"}), 500
+        pattern = f"face:embeddings:camp:{camp_id}:group:*"
+        keys = redis_client.keys(pattern)
+        deleted = 0
+        for key in keys:
+            redis_client.delete(key)
+            deleted += 1
         return jsonify({
             "success": True,
-            "message": f"Camp {camp_id} data cleared successfully",
-            "deleted": deleted_items
+            "message": f"Cleared {deleted} Redis embedding keys for camp {camp_id}",
+            "deleted_keys": deleted
         }), 200
-    
     except Exception as e:
-        logger.error(f"❌ Error clearing camp {camp_id}: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "camp_id": camp_id
-        }), 500
+        logger.error(f"Error clearing Redis embeddings for camp {camp_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/face-db/clear-embeddings', methods=['DELETE'])
@@ -1062,16 +1193,22 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        # Check if embeddings are cached (eager loaded during face-db load)
-        cached_count = len(face_service.embedding_cache.cache)
-        if cached_count == 0:
-            logger.warning(f"⚠️ No embeddings cached for group {group_id}. This should have been loaded via /api/face-db/load/{camp_id}")
-            logger.info(f"⚡ Loading embeddings for group {group_id} now...")
-            face_service.embedding_cache.clear_cache()
-            face_service.embedding_cache._load_embeddings_from_folder(group_folder)
-            logger.info(f"✅ Cached {len(face_service.embedding_cache.cache)} embeddings")
+        # CRITICAL: Only use Redis embeddings, do not fall back to RAM or filesystem
+        embeddings = face_service.embedding_cache.get_embeddings_redis(camp_id, group_id)
+        if not embeddings:
+            logger.warning(f"⚠️ No embeddings found in Redis for camp {camp_id}, group {group_id}")
+            logger.warning(f"⚠️ Possible reasons: 1) Camp not preloaded, 2) Redis key expired, 3) Group ID mismatch")
+            return jsonify({
+                "success": False,
+                "message": f"No embeddings found in Redis for camp {camp_id}, group {group_id}. Please preload the camp/group.",
+                "campId": camp_id,
+                "groupId": group_id
+            }), 404
         else:
-            logger.info(f"✅ Using {cached_count} cached embeddings for recognition")
+            logger.info(f"✅ Using {len(embeddings)} embeddings from Redis for recognition (Redis-only mode)")
+        
+        # Load embeddings into cache ONLY for this recognition request
+        face_service.embedding_cache.cache = embeddings
         
         session_id = str(uuid.uuid4())
         
@@ -1141,6 +1278,10 @@ def recognize_faces_for_group(camp_id, group_id):
             logger.warning(f"[{request_id}] ⚠️ No activityScheduleId provided, skipping webhook")
             response_data["webhookQueued"] = False
         
+        # Clear RAM cache after recognition completes
+        face_service.embedding_cache.clear_cache()
+        logger.info(f"[{request_id}] 🧹 RAM cache cleared after recognition")
+        
         return jsonify(response_data), 200
     
     except Exception as e:
@@ -1154,6 +1295,8 @@ def recognize_faces_for_group(camp_id, group_id):
     
     finally:
         file_handler.cleanup_file(temp_file)
+        # Ensure cache is cleared even on error
+        face_service.embedding_cache.clear_cache()
 
 
 @app.route('/api/recognition/recognize-activity/<int:camp_id>/<int:activity_schedule_id>', methods=['POST'])
@@ -1219,9 +1362,11 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
                 "activityScheduleId": activity_schedule_id
             }), 404
         
-        # Clear cache and load only this activity's embeddings for accurate activity-specific recognition
+        # ⚠️ WARNING: Activity recognition currently uses filesystem fallback
+        # TODO: Migrate activities to Redis-based storage like groups
+        # For now, load from filesystem as activities are not part of preload
         face_service.embedding_cache.clear_cache()
-        logger.info(f"⚡ Loading embeddings for activity {activity_schedule_id} only...")
+        logger.warning(f"⚠️ Loading embeddings for activity {activity_schedule_id} from filesystem (Redis not implemented for activities)")
         face_service.embedding_cache._load_embeddings_from_folder(activity_folder)
         
         session_id = str(uuid.uuid4())
@@ -1283,6 +1428,10 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
         
         response_data["webhookQueued"] = True
         
+        # Clear RAM cache after recognition completes
+        face_service.embedding_cache.clear_cache()
+        logger.info(f"[{request_id}] 🧹 RAM cache cleared after activity recognition")
+        
         return jsonify(response_data), 200
     
     except Exception as e:
@@ -1296,6 +1445,8 @@ def recognize_faces_for_activity(camp_id, activity_schedule_id):
     
     finally:
         file_handler.cleanup_file(temp_file)
+        # Ensure cache is cleared even on error
+        face_service.embedding_cache.clear_cache()
 
 
 @app.route('/api/face/detect', methods=['POST'])
@@ -1524,6 +1675,8 @@ def mobile_recognize_faces():
         recognized_campers = []
         for r in recognized_faces:
             camper_id = r.get('camper_id', -1)
+            # Convert to int safely (handle string or int)
+            camper_id = int(camper_id) if camper_id not in [None, -1, '-1'] else -1
             if camper_id > 0:  # Only include recognized faces
                 recognized_campers.append({
                     "camperId": int(camper_id),

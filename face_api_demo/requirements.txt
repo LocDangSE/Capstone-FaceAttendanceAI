@@ -43,3 +43,6 @@ pytest-cov==6.0.0
 
 # Swagger/OpenAPI (Manual implementation)
 # Note: Spectree removed due to Pydantic v2 incompatibility
+
+# Redis for Caching
+redis==5.0.1
