@@ -35,24 +35,31 @@ def _get_or_load_model(model_name: str):
     if model_name not in _model_cache:
         with _model_lock:
             if model_name not in _model_cache:
-                logger.info(f"🔥 Loading model {model_name} (first time only)...")
+                import time
+                start_time = time.time()
+                logger.info(f"🔥 [MODEL_LOAD] Starting to load model {model_name} (first time only)...")
                 # Trigger model loading by calling DeepFace.build_model (correct API)
                 try:
+                    logger.info(f"🔧 [MODEL_LOAD] Attempting build_model for {model_name}...")
                     from deepface.commons import functions
                     model_obj = functions.build_model(model_name)
                     _model_cache[model_name] = model_obj
-                    logger.info(f"✅ Model {model_name} loaded and cached via build_model")
+                    elapsed = time.time() - start_time
+                    logger.info(f"✅ [MODEL_LOAD] Model {model_name} loaded via build_model in {elapsed:.2f}s")
                 except Exception as e:
                     # Fallback: Use DeepFace.represent to trigger model loading
-                    logger.info(f"Using fallback method to load {model_name}: {e}")
+                    logger.warning(f"⚠️ [MODEL_LOAD] build_model failed, using fallback for {model_name}: {e}")
                     import traceback
                     logger.debug(f"Fallback reason traceback: {traceback.format_exc()}")
                     try:
+                        logger.info(f"🔄 [MODEL_LOAD] Fallback: Using represent to load {model_name}...")
                         dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
                         DeepFace.represent(img_path=dummy_img, 
                                           model_name=model_name, 
                                           enforce_detection=False)
                         _model_cache[model_name] = True
+                        elapsed = time.time() - start_time
+                        logger.info(f"✅ [MODEL_LOAD] Model {model_name} loaded via fallback in {elapsed:.2f}s")
                         logger.info(f"✅ Model {model_name} loaded and cached via represent")
                     except Exception as fallback_error:
                         logger.error(f"❌ Failed to load model {model_name}: {fallback_error}")
@@ -180,17 +187,31 @@ class EmbeddingCache:
             # Use ThreadPoolExecutor for parallel generation (1 worker to avoid TensorFlow deadlock on Windows)
             results = []
             try:
+                logger.info(f"🛠️ [EXECUTOR] Creating ThreadPoolExecutor for {len(image_files)} images...")
                 with ThreadPoolExecutor(max_workers=1) as executor:
+                    logger.info(f"🚀 [EXECUTOR] Submitting {len(image_files)} tasks...")
                     futures = [executor.submit(process_single_image, img) for img in image_files]
+                    logger.info(f"✅ [EXECUTOR] All tasks submitted, waiting for results...")
                     
                     for idx, future in enumerate(futures):
                         try:
-                            result = future.result(timeout=60)
+                            import time
+                            start_wait = time.time()
+                            logger.info(f"⏳ [EXECUTOR] Waiting for embedding {idx + 1}/{len(image_files)} (timeout: 240s)...")
+                            result = future.result(timeout=240)
+                            elapsed = time.time() - start_wait
+                            logger.info(f"✅ [EXECUTOR] Embedding {idx + 1}/{len(image_files)} completed in {elapsed:.2f}s")
                             results.append(result)
                             if (idx + 1) % 3 == 0 or (idx + 1) == len(image_files):
-                                logger.info(f"Progress: {idx + 1}/{len(image_files)} embeddings generated")
+                                logger.info(f"📊 Progress: {idx + 1}/{len(image_files)} embeddings generated")
+                        except TimeoutError as te:
+                            logger.error(f"⏰ [EXECUTOR] TIMEOUT after 240s for embedding {idx + 1}")
+                            logger.error(f"💡 Likely stuck in: model loading, detector initialization, or image processing")
+                            results.append(None)
                         except Exception as e:
-                            logger.error(f"Exception generating embedding {idx}: {e}")
+                            logger.error(f"❌ [EXECUTOR] Exception generating embedding {idx}: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
                             results.append(None)
             except Exception as e:
                 logger.error(f"ThreadPoolExecutor error: {e}")
@@ -300,25 +321,43 @@ class EmbeddingCache:
             Numpy array or None on failure
         """
         try:
-            logger.info(f"[generate_embedding] Using model: {self.model_name}")
-            logger.debug(f"Generating embedding for: {image_path}")
+            import time
+            overall_start = time.time()
+            logger.info(f"🔍 [EMBEDDING] START - Model: {self.model_name}, Detector: {settings.DEEPFACE_DETECTOR}")
+            logger.info(f"📁 [EMBEDDING] Image path: {image_path}")
+            
             # OPTIMIZATION: Ensure model is loaded (singleton pattern)
+            logger.info(f"🔥 [EMBEDDING] Step 1/4: Loading model {self.model_name}...")
+            model_start = time.time()
             _get_or_load_model(self.model_name)
+            model_elapsed = time.time() - model_start
+            logger.info(f"✅ [EMBEDDING] Step 1/4: Model ready in {model_elapsed:.2f}s")
+            
             # Use DeepFace to generate embedding
+            logger.info(f"🎯 [EMBEDDING] Step 2/4: Calling DeepFace.represent (detector={settings.DEEPFACE_DETECTOR})...")
+            represent_start = time.time()
             embedding_objs = DeepFace.represent(
                 img_path=image_path,
                 model_name=self.model_name,
                 enforce_detection=False,
                 detector_backend=settings.DEEPFACE_DETECTOR
             )
+            represent_elapsed = time.time() - represent_start
+            logger.info(f"✅ [EMBEDDING] Step 2/4: DeepFace.represent completed in {represent_elapsed:.2f}s")
+            
+            logger.info(f"📊 [EMBEDDING] Step 3/4: Processing embedding result...")
             if not embedding_objs or len(embedding_objs) == 0:
-                logger.error("No embedding generated")
+                logger.error("❌ [EMBEDDING] No embedding generated")
                 return None
+            
             # Extract embedding vector
+            logger.info(f"🔢 [EMBEDDING] Step 4/4: Converting to numpy array...")
             embedding = np.array(embedding_objs[0]['embedding'], dtype=np.float64)
             # CRITICAL: Ensure float32 to match expected storage format
             embedding = embedding.astype(np.float32)
-            logger.info(f"[generate_embedding] Model: {self.model_name}, Embedding shape: {embedding.shape}, dtype: {embedding.dtype}, actual_dim: {embedding.shape[0]}")
+            
+            overall_elapsed = time.time() - overall_start
+            logger.info(f"✅ [EMBEDDING] COMPLETE in {overall_elapsed:.2f}s - Shape: {embedding.shape}, dtype: {embedding.dtype}")
             return embedding
         except KeyboardInterrupt:
             # Re-raise keyboard interrupt to allow graceful shutdown
@@ -630,7 +669,7 @@ class EmbeddingCache:
             pipe.hset(key, camper_id, emb_bytes)
         logger.info(f"📦 [STORAGE] Storing embeddings: {', '.join(bytes_info)}")
         now_ts = int(datetime.utcnow().timestamp())
-        # Fallback: 1 hour TTL if expire_at is missing/invalid
+        # Fallback: 1 week TTL if expire_at is missing/invalid
         if not expire_at or expire_at <= now_ts:
             ttl_seconds = 7 * 24 * 3600
             logger.warning(f"⚠️ expire_at missing/invalid for {key}, using fallback TTL: {ttl_seconds}s (7 days)")
