@@ -1650,6 +1650,23 @@ def mobile_recognize_faces():
             f"(camp={camp_id}, group={group_id}, activity={activity_schedule_id})"
         )
         
+        # ✅ CRITICAL FIX: Load embeddings from Redis before recognition
+        embeddings = face_service.embedding_cache.get_embeddings_redis(int(camp_id), int(group_id))
+        if not embeddings:
+            logger.error(f"[{request_id}] ❌ No embeddings found in Redis for camp {camp_id}, group {group_id}")
+            return jsonify({
+                "success": False,
+                "error": f"No embeddings found in Redis. Please ensure camp {camp_id} is pre-loaded.",
+                "requiresPreload": True,
+                "campId": int(camp_id),
+                "groupId": int(group_id)
+            }), 404
+        
+        logger.info(f"[{request_id}] ✅ Loaded {len(embeddings)} embeddings from Redis for group {group_id}")
+        
+        # Load embeddings into cache for this recognition request
+        face_service.embedding_cache.cache = embeddings
+        
         # Generate unique session ID
         session_id = str(uuid.uuid4())
         
@@ -1659,6 +1676,10 @@ def mobile_recognize_faces():
             session_id=session_id,
             save_results=False  # Skip disk I/O for speed
         )
+        
+        # Clear cache after recognition
+        face_service.embedding_cache.clear_cache()
+        logger.debug(f"[{request_id}] 🧹 Cleared cache after recognition")
         
         recognition_time = (datetime.now() - recognition_start).total_seconds()
         logger.info(f"[{request_id}] ✅ Recognition completed in {recognition_time:.2f}s")
