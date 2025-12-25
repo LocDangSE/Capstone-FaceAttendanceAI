@@ -91,6 +91,115 @@ file_handler = FileHandler()
 # Global state for loaded camps
 loaded_camps: Dict[int, Dict] = {}
 
+# ============================================================================
+# HELPER FUNCTION: Lazy Recovery from Local Database
+# ============================================================================
+def load_embeddings_from_local(group_folder: Path, camp_id: int = None, group_id: int = None) -> Dict[str, np.ndarray]:
+    """
+    🔄 FULL GROUP RECOVERY: Load embeddings for ALL campers in the group
+    
+    Trade-off Strategy:
+    - First request after Redis restart: VERY SLOW (30s-2min) ❌
+    - Subsequent requests: FAST (Redis cached) ✅
+    
+    This ensures complete group embeddings are available, avoiding
+    repeated slow requests for each individual camper.
+    
+    Args:
+        group_folder: Path to camper_group_X folder
+        camp_id: Camp ID (for logging)
+        group_id: Group ID (for logging)
+        
+    Returns:
+        Dictionary of camper_id -> embedding numpy array (ALL campers in group)
+    """
+    embeddings = {}
+    request_id = str(uuid.uuid4())[:8]
+    
+    try:
+        # Get all face images in the group
+        image_files = list(group_folder.glob("avatar_*.jpg")) + \
+                      list(group_folder.glob("avatar_*.png"))
+        
+        if not image_files:
+            logger.warning(f"[{request_id}] ⚠️ No images found in {group_folder}")
+            return {}
+        
+        logger.warning(f"[{request_id}] ⚠️ ==================== FULL GROUP RECOVERY ====================")
+        logger.warning(f"[{request_id}] ⚠️ Redis is empty! Loading ALL {len(image_files)} campers in group...")
+        logger.warning(f"[{request_id}] ⚠️ This will take 30s-2min (trade-off: next requests will be fast)")
+        logger.warning(f"[{request_id}] ⚠️ Camp: {camp_id}, Group: {group_id}")
+        logger.warning(f"[{request_id}] ⚠️ ================================================================")
+        
+        import re
+        failed_campers = []
+        loaded_from_disk = 0
+        generated_new = 0
+        
+        for idx, image_file in enumerate(image_files, 1):
+            try:
+                # Extract camper_id from filename
+                # Support both formats:
+                # - avatar_123.jpg (simple format)
+                # - avatar_21_avatar_f7554becf86b45e8b291c9c1d872baa9.jpg (Supabase format)
+                match = re.search(r'avatar_(\d+)', image_file.stem)
+                if not match:
+                    logger.warning(f"[{request_id}] [{idx}/{len(image_files)}] ⚠️ Invalid filename: {image_file.name}")
+                    failed_campers.append(image_file.name)
+                    continue
+                
+                camper_id = match.group(1)
+                
+                # Check if embedding already exists in embeddings folder (.npy file)
+                embedding_path = settings.EMBEDDINGS_FOLDER / f"{camper_id}.npy"
+                
+                if embedding_path.exists():
+                    # Load from pre-generated embedding (FAST: ~1ms)
+                    embedding = np.load(str(embedding_path))
+                    loaded_from_disk += 1
+                    logger.info(f"[{request_id}] [{idx}/{len(image_files)}] ⚡ Loaded from .npy: camper {camper_id}")
+                else:
+                    # Generate on-the-fly (SLOW: ~1-2s per camper)
+                    logger.info(f"[{request_id}] [{idx}/{len(image_files)}] 🔄 Generating embedding: camper {camper_id}...")
+                    embedding = face_service.embedding_cache.generate_embedding(str(image_file))
+                    if embedding is None:
+                        logger.error(f"[{request_id}] [{idx}/{len(image_files)}] ❌ Failed: camper {camper_id}")
+                        failed_campers.append(f"camper_{camper_id}")
+                        continue
+                    generated_new += 1
+                    logger.info(f"[{request_id}] [{idx}/{len(image_files)}] ✅ Generated: camper {camper_id}")
+                
+                embeddings[camper_id] = embedding
+                
+                # Progress indicator every 5 campers
+                if idx % 5 == 0 or idx == len(image_files):
+                    logger.warning(
+                        f"[{request_id}] 📊 Progress: {idx}/{len(image_files)} "
+                        f"({int(idx/len(image_files)*100)}%) - "
+                        f"{len(embeddings)} successful, {len(failed_campers)} failed"
+                    )
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] ❌ Error processing {image_file}: {e}")
+                failed_campers.append(image_file.name)
+        
+        # Final summary
+        logger.warning(f"[{request_id}] ✅ ==================== RECOVERY COMPLETE ====================")
+        logger.warning(f"[{request_id}] ✅ Total embeddings loaded: {len(embeddings)}/{len(image_files)}")
+        logger.warning(f"[{request_id}] ✅ Loaded from disk (.npy): {loaded_from_disk}")
+        logger.warning(f"[{request_id}] ✅ Generated new: {generated_new}")
+        if failed_campers:
+            logger.error(f"[{request_id}] ❌ Failed campers ({len(failed_campers)}): {', '.join(failed_campers[:10])}")
+        logger.warning(f"[{request_id}] ✅ ================================================================")
+        
+        return embeddings
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] ❌ Recovery failed catastrophically: {e}")
+        import traceback
+        logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+        return {}
+
 logger.info("="*60)
 logger.info("🚀 Face Recognition API Service Starting...")
 logger.info(f"📦 Model: {settings.DEEPFACE_MODEL}")
@@ -98,6 +207,7 @@ logger.info(f"🎯 Confidence Threshold (from .env): {settings.CONFIDENCE_THRESH
 logger.info(f"📁 Face DB Root: {settings.DATABASE_FOLDER}")
 logger.info(f"🔒 JWT Auth: Enabled (Issuer: {app.config['JWT_ISSUER']})")
 logger.info(f"📚 Swagger UI: /apidoc")
+logger.info(f"🔄 Auto-Recovery: Enabled (Option A - Lazy Recovery)")
 logger.info("="*60)
 
 
@@ -605,7 +715,7 @@ def load_camp_face_database(camp_id):
         # Get expire_at and force_reload from request body (sent by .NET)
         expire_at = None
         forceReload = False
-        skip_supabase = False  # Ensure variable is always defined
+        skip_supabase = False  
         if request.is_json:
             data = request.get_json()
             expire_at = data.get('expire_at')
@@ -999,6 +1109,58 @@ def get_camp_stats():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/face-db/status/<int:camp_id>', methods=['GET'])
+@require_auth
+def get_camp_status(camp_id):
+    """Check if a specific camp is loaded in Redis"""
+    try:
+        logger.info(f"[STATUS] Checking if camp {camp_id} is loaded in Redis")
+        
+        # Check Redis for camp groups
+        groups_loaded = []
+        total_faces = 0
+        
+        # Scan Redis keys matching pattern face:embeddings:camp:{camp_id}:group:*
+        redis_client = face_service.embedding_cache.redis_client
+        pattern = f"face:embeddings:camp:{camp_id}:group:*"
+        keys = redis_client.keys(pattern)
+        
+        for key in keys:
+            # Extract group_id from key
+            # Format: face:embeddings:camp:{camp_id}:group:{group_id}
+            try:
+                group_id = int(key.decode('utf-8').split(':')[-1])
+                groups_loaded.append(group_id)
+                
+                # Get embedding count for this group
+                embedding_data = redis_client.get(key)
+                if embedding_data:
+                    # Decode the stored data to count embeddings
+                    import json
+                    stored_obj = json.loads(embedding_data)
+                    if 'campers' in stored_obj:
+                        total_faces += len(stored_obj['campers'])
+            except Exception as e:
+                logger.warning(f"[STATUS] Error parsing key {key}: {e}")
+                continue
+        
+        is_loaded = len(groups_loaded) > 0
+        
+        return jsonify({
+            "camp_id": camp_id,
+            "is_loaded": is_loaded,
+            "groups": groups_loaded,
+            "total_faces": total_faces
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"[STATUS] Error checking camp {camp_id} status: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/api/face-db/clear-all', methods=['DELETE'])
 @require_auth
 def clear_all_face_data():
@@ -1193,19 +1355,56 @@ def recognize_faces_for_group(camp_id, group_id):
                 "groupId": group_id
             }), 404
         
-        # CRITICAL: Only use Redis embeddings, do not fall back to RAM or filesystem
+        # ========== OPTION A: LAZY RECOVERY MECHANISM ==========
+        # Try to load embeddings from Redis first
         embeddings = face_service.embedding_cache.get_embeddings_redis(camp_id, group_id)
+        
         if not embeddings:
-            logger.warning(f"⚠️ No embeddings found in Redis for camp {camp_id}, group {group_id}")
-            logger.warning(f"⚠️ Possible reasons: 1) Camp not preloaded, 2) Redis key expired, 3) Group ID mismatch")
-            return jsonify({
-                "success": False,
-                "message": f"No embeddings found in Redis for camp {camp_id}, group {group_id}. Please preload the camp/group.",
-                "campId": camp_id,
-                "groupId": group_id
-            }), 404
+            # Redis empty - attempt recovery from local database
+            logger.warning(f"⚠️ [{request_id}] Redis empty for camp {camp_id}, group {group_id}")
+            logger.warning(f"⚠️ [{request_id}] Possible causes: Redis restart, TTL expired, or preload not called")
+            logger.info(f"🔄 [{request_id}] Attempting auto-recovery from local face_database...")
+            
+            # Check if local face_database exists
+            if group_folder.exists():
+                try:
+                    # Load embeddings from disk (FULL GROUP RECOVERY)
+                    embeddings = load_embeddings_from_local(group_folder, camp_id, group_id)
+                    
+                    if embeddings:
+                        logger.info(f"✅ [{request_id}] Recovered {len(embeddings)} embeddings from disk")
+                        
+                        # Restore to Redis for future requests (with default 7-day TTL)
+                        try:
+                            face_service.embedding_cache.set_embeddings_redis(
+                                camp_id, group_id, embeddings, expire_at=None
+                            )
+                            logger.info(f"✅ [{request_id}] Restored embeddings to Redis (TTL: 7 days)")
+                        except Exception as redis_error:
+                            # Non-fatal: continue with recovered embeddings even if Redis restore fails
+                            logger.error(f"⚠️ [{request_id}] Redis restore failed: {redis_error}")
+                            logger.warning(f"⚠️ [{request_id}] Continuing with recovered embeddings (Redis not updated)")
+                    else:
+                        logger.error(f"❌ [{request_id}] Recovery failed: No embeddings generated from disk")
+                        
+                except Exception as recovery_error:
+                    logger.error(f"❌ [{request_id}] Recovery failed: {recovery_error}")
+                    import traceback
+                    logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+            
+            # Final check after recovery attempt
+            if not embeddings:
+                logger.error(f"❌ [{request_id}] CRITICAL: No embeddings available after recovery")
+                return jsonify({
+                    "success": False,
+                    "error": "NO_EMBEDDINGS",
+                    "message": f"No embeddings found for camp {camp_id}, group {group_id}. Auto-recovery failed.",
+                    "campId": camp_id,
+                    "groupId": group_id,
+                    "action_required": f"Please call: POST /api/face-db/load/{camp_id}"
+                }), 404
         else:
-            logger.info(f"✅ Using {len(embeddings)} embeddings from Redis for recognition (Redis-only mode)")
+            logger.info(f"✅ [{request_id}] Using {len(embeddings)} embeddings from Redis (cache hit)")
         
         # Load embeddings into cache ONLY for this recognition request
         face_service.embedding_cache.cache = embeddings
@@ -1649,6 +1848,61 @@ def mobile_recognize_faces():
             f"[{request_id}] 🎯 Starting face recognition "
             f"(camp={camp_id}, group={group_id}, activity={activity_schedule_id})"
         )
+        
+        # ========== LOAD EMBEDDINGS WITH AUTO-RECOVERY ==========
+        # Try to load embeddings from Redis first
+        embeddings = face_service.embedding_cache.get_embeddings_redis(int(camp_id), int(group_id))
+        
+        if not embeddings:
+            # Redis empty - attempt recovery from local database
+            logger.warning(f"⚠️ [{request_id}] Redis empty for camp {camp_id}, group {group_id}")
+            logger.warning(f"⚠️ [{request_id}] Possible causes: Redis restart, TTL expired, or preload not called")
+            logger.info(f"🔄 [{request_id}] Attempting auto-recovery from local face_database...")
+            
+            # Check if local face_database exists
+            if group_folder.exists():
+                try:
+                    # Load embeddings from disk (FULL GROUP RECOVERY)
+                    embeddings = load_embeddings_from_local(group_folder, int(camp_id), int(group_id))
+                    
+                    if embeddings:
+                        logger.info(f"✅ [{request_id}] Recovered {len(embeddings)} embeddings from disk")
+                        
+                        # Restore to Redis for future requests (with default 7-day TTL)
+                        try:
+                            face_service.embedding_cache.set_embeddings_redis(
+                                int(camp_id), int(group_id), embeddings, expire_at=None
+                            )
+                            logger.info(f"✅ [{request_id}] Restored embeddings to Redis (TTL: 7 days)")
+                        except Exception as redis_error:
+                            # Non-fatal: continue with recovered embeddings even if Redis restore fails
+                            logger.error(f"⚠️ [{request_id}] Redis restore failed: {redis_error}")
+                            logger.warning(f"⚠️ [{request_id}] Continuing with recovered embeddings (Redis not updated)")
+                    else:
+                        logger.error(f"❌ [{request_id}] Recovery failed: No embeddings generated from disk")
+                        
+                except Exception as recovery_error:
+                    logger.error(f"❌ [{request_id}] Recovery failed: {recovery_error}")
+                    import traceback
+                    logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+            
+            # Final check after recovery attempt
+            if not embeddings:
+                logger.error(f"❌ [{request_id}] CRITICAL: No embeddings available after recovery")
+                return jsonify({
+                    "success": False,
+                    "error": "NO_EMBEDDINGS",
+                    "message": f"No embeddings found for camp {camp_id}, group {group_id}. Auto-recovery failed.",
+                    "campId": int(camp_id),
+                    "groupId": int(group_id),
+                    "requiresPreload": True,
+                    "action_required": f"Please call: POST /api/face-db/load/{camp_id}"
+                }), 503  # Service Unavailable
+        else:
+            logger.info(f"✅ [{request_id}] Using {len(embeddings)} embeddings from Redis (cache hit)")
+        
+        # Load embeddings into cache for this request
+        face_service.embedding_cache.cache = embeddings
         
         # Generate unique session ID
         session_id = str(uuid.uuid4())
