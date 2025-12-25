@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_model(cls, v):
         """Validate DeepFace model name"""
-        valid_models = ['VGG-Face', 'Facenet', 'Facenet', 'OpenFace', 'DeepFace', 'DeepID', 'Dlib', 'ArcFace']
+        valid_models = ['VGG-Face', 'Facenet', 'Facenet512', 'OpenFace', 'DeepFace', 'DeepID', 'Dlib', 'ArcFace', 'SFace']
         if v not in valid_models:
             raise ValueError(f'DEEPFACE_MODEL must be one of: {", ".join(valid_models)}')
         return v

@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
-
+#Trigger deployment
 # Copy requirements first for better caching
 COPY requirements.txt .
 
@@ -32,19 +32,21 @@ ENV PORT=10000
 # Expose port (Railway will override with $PORT)
 EXPOSE 10000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:10000/health', timeout=5)" || exit 1
+# Health check - increased timeout for model loading
+HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:$PORT/health', timeout=10)" || exit 1
 
-# Run gunicorn - optimized for Railway Hobby plan (8GB RAM, 8 vCPU)
-CMD gunicorn -w 4 -b 0.0.0.0:$PORT \
-    --timeout 120 \
+# Run gunicorn - Railway optimized (2 workers to prevent OOM)
+# Railway auto-sets $PORT, WEB_CONCURRENCY from .env
+CMD gunicorn -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:${PORT:-10000} \
+    --timeout ${GUNICORN_TIMEOUT:-120} \
     --graceful-timeout 120 \
     --keep-alive 5 \
-    --max-requests 1000 \
-    --max-requests-jitter 50 \
+    --max-requests ${GUNICORN_MAX_REQUESTS:-500} \
+    --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50} \
     --worker-class sync \
     --worker-tmp-dir /dev/shm \
+    --preload \
     --log-level info \
     --access-logfile - \
     --error-logfile - \

@@ -632,8 +632,8 @@ class EmbeddingCache:
         now_ts = int(datetime.utcnow().timestamp())
         # Fallback: 1 hour TTL if expire_at is missing/invalid
         if not expire_at or expire_at <= now_ts:
-            ttl_seconds = 3600
-            logger.warning(f"⚠️ expire_at missing/invalid for {key}, using fallback TTL: {ttl_seconds}s (1 hour)")
+            ttl_seconds = 7 * 24 * 3600
+            logger.warning(f"⚠️ expire_at missing/invalid for {key}, using fallback TTL: {ttl_seconds}s (7 days)")
         else:
             ttl_seconds = max(0, expire_at - now_ts)
         pipe.expire(key, ttl_seconds)
