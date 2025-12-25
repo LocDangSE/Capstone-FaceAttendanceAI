@@ -185,7 +185,7 @@ class EmbeddingCache:
                     
                     for idx, future in enumerate(futures):
                         try:
-                            result = future.result(timeout=60)
+                            result = future.result(timeout=240)
                             results.append(result)
                             if (idx + 1) % 3 == 0 or (idx + 1) == len(image_files):
                                 logger.info(f"Progress: {idx + 1}/{len(image_files)} embeddings generated")
