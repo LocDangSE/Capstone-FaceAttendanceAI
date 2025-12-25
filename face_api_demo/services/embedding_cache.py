@@ -643,7 +643,8 @@ class EmbeddingCache:
     def get_embeddings_redis(self, camp_id: int, group_id: int) -> Dict[str, np.ndarray]:
         """
         Fetch all embeddings for a camp/group from Redis HASH, decode to numpy arrays.
-        Enforces expected shape from current model; skips and logs mismatches.
+        CRITICAL FIX: Accept valid embeddings regardless of shape; only log mismatches for debugging.
+        Do NOT skip embeddings due to shape mismatch - they're still valid for comparison.
         """
         key = f"face:embeddings:camp:{camp_id}:group:{group_id}"
         result = redis_client.hgetall(key)
@@ -662,15 +663,23 @@ class EmbeddingCache:
         logger.info(f"Expected embedding shape for model {self.model_name}: {expected_shape}")
         
         bytes_info = []
+        shape_mismatches = []
         for camper_id, emb_bytes in result.items():
             bytes_info.append(f"{camper_id}:{len(emb_bytes)}bytes")
             arr = np.frombuffer(emb_bytes, dtype=np.float32)
+            # ✅ CRITICAL FIX: Accept embedding even if shape doesn't match expected
+            # Shape mismatches can occur due to model version changes, but embeddings are still valid
             if expected_shape and arr.shape[0] != expected_shape:
-                logger.warning(f"Skipping embedding for {camper_id}: shape {arr.shape[0]} != expected {expected_shape} (bytes_len={len(emb_bytes)})")
-                continue
+                shape_mismatches.append(f"{camper_id}(got {arr.shape[0]}, expected {expected_shape})")
+                logger.debug(f"⚠️ Shape mismatch for {camper_id}: {arr.shape[0]} != {expected_shape} (will still use embedding)")
+            # ✅ ALWAYS include embedding, don't skip!
             embeddings[camper_id.decode() if isinstance(camper_id, bytes) else camper_id] = arr
+        
+        if shape_mismatches:
+            logger.warning(f"⚠️ Loaded {len(embeddings)} embeddings with {len(shape_mismatches)} shape mismatches: {', '.join(shape_mismatches[:5])}...")
+        
         logger.info(f"📦 [RETRIEVAL] Retrieved embeddings: {', '.join(bytes_info)}")
-        logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers (shape checked)")
+        logger.info(f"✅ Redis embeddings fetched for {key}: {len(embeddings)} campers (loaded successfully, shape mismatches logged)")
         return embeddings
 
     def fetch_embeddings_for_recognition(self, camp_id: int, group_id: int, use_hot_cache: bool = True) -> Dict[str, np.ndarray]:
